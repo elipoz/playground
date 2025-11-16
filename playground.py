@@ -247,8 +247,8 @@ if __name__ == "__main__":
 
     print("\n".join(output_lines))
 
-    st.markdown(
-    """
-    This is a simple Streamlit app that uses the OpenAI API to search the internet for recent and relevant information about a topic.
-    """
-   )
+st.markdown(
+"""
+This is a simple Streamlit app that uses the OpenAI API to search the internet for recent and relevant information about a topic.
+"""
+)
