@@ -2,5 +2,5 @@ streamlit
 requests
 ipykernel
 python-dotenv
-openai
+openai>=2.8.0
 pydantic
