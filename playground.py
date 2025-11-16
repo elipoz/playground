@@ -218,15 +218,15 @@ Focus: {style}"""
 # Step 5: Example usage
 # --------------------------------------------------------------
 
-if __name__ == "__main__":
-    orchestrator = UrlFinder()
+def find_urls(topic: str) -> str:
+    urlFinder = UrlFinder()
 
     # Example: Search for recent articles
-    topic = "Recent articles about Tigrisdata"
-    result = orchestrator.find_urls(
+    topic = f"recent articles about {topic}"
+    result = urlFinder.find_urls(
         topic=topic,
         target_length=5,
-        style="blob snapshotting and object storage"
+        style="technical"
     )
 
     output_lines = [
@@ -245,10 +245,16 @@ if __name__ == "__main__":
             f"   Description: {url_info.description}"
         ])
 
-    print("\n".join(output_lines))
+    return "\n".join(output_lines)
 
 st.markdown(
 """
 This is a simple Streamlit app that uses the OpenAI API to search the internet for recent and relevant information about a topic.
 """
 )
+
+user_input = st.text_input(label='Enter your topic here:')
+
+if user_input:
+    result = find_urls(user_input)
+    st.markdown(result)
