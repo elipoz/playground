@@ -5,6 +5,8 @@ import os
 import logging
 import requests
 import pandas as pd
+import pydeck as pdk
+import math
 from datetime import datetime, date
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -65,15 +67,21 @@ def search_travel_activities(query: str, max_results: int = 20) -> str:
         images = data.get("images", [])
 
         for idx, result in enumerate(data.get("results", []), 1):
-            # Try to associate an image with each result
-            image_url = images[idx - 1] if idx - 1 < len(images) else "No image available"
+            # Try to associate an image with each result - only include valid URLs
+            image_url = ""
+            if idx - 1 < len(images):
+                img = images[idx - 1]
+                if img and isinstance(img, str) and img.startswith(("http://", "https://")):
+                    image_url = img
+
+            image_line = f"Image: {image_url}" if image_url else "Image: (none available)"
 
             results.append(f"""
 Activity {idx}:
 Title: {result.get('title', 'N/A')}
 URL: {result.get('url', 'N/A')}
 Content: {result.get('content', 'N/A')}
-Image: {image_url}
+{image_line}
 Score: {result.get('score', 'N/A')}
 ---""")
 
@@ -152,10 +160,11 @@ class TravelPlanner:
         self.activity_llm = llm.with_structured_output(ActivityList)
         self.itinerary_llm = llm.with_structured_output(TravelItinerary)
 
-    def find_activities(self, destination: str, preferences: Optional[str] = None) -> ActivityList:
+    def find_activities(self, destination: str, preferences: Optional[str] = None, num_days: int = 5, num_activities: int = 10, num_hubs: int = 2) -> ActivityList:
         """Find activities and attractions for a destination, grouped by geographic hubs"""
 
         logger.info(f"Searching for activities in: {destination}")
+        logger.info(f"Trip duration: {num_days} days, Target activities: {num_activities}, Target hubs: {num_hubs}")
         if preferences:
             logger.info(f"With preferences: {preferences}")
 
@@ -169,11 +178,19 @@ class TravelPlanner:
 
 Use the search_travel_activities tool to find popular activities, attractions, and experiences in: {destination}
 Look for a diverse mix of activities including cultural sites, outdoor activities, food experiences, entertainment, and unique local experiences.
-Focus on identifying major geographic hubs (cities/areas) where travelers can stay.
-Target: Up to 20 activities total across all hubs{preference_text}"""
+Focus on identifying exactly {num_hubs} DISTINCT major geographic hub{'s' if num_hubs != 1 else ''} (specific cities/areas) where travelers can stay.
+Pay attention to the actual locations mentioned in search results (city names, specific areas).
+Target: {num_activities} activities total across all {num_hubs} hub{'s' if num_hubs != 1 else ''} (based on {num_days}-day trip){preference_text}"""
 
         # Build human message with preferences
-        human_message = f"Find the top activities and attractions in {destination}. Include information about major cities and regions."
+        human_message = f"""Find the top activities and attractions in {destination}.
+
+When searching, pay attention to:
+- Specific city or area names mentioned in the results
+- Geographic locations of activities
+- Major tourist hubs/cities in {destination}
+
+Include information about major cities and specific regions."""
         if preferences:
             human_message += f"\n\nUser preferences to consider: {preferences}"
 
@@ -194,31 +211,57 @@ Target: Up to 20 activities total across all hubs{preference_text}"""
         # Build structured output prompt with preferences
         structured_system_content = f"""You are analyzing search results about activities in {destination}.
 
-IMPORTANT: Group activities by geographic hubs. Each hub should be a main city or area where travelers can stay.
-All activities in a hub group should be within 50-100 miles radius of that hub.{preference_text}
+CRITICAL GEOGRAPHIC REQUIREMENTS:
+1. Each hub MUST be a distinct major city or region where travelers can stay
+2. STRICTLY verify that ALL activities assigned to a hub are within 50-100 miles (80-160 km) of that hub
+3. DO NOT group activities from different cities/regions together unless they are truly within the distance limit
+4. If an activity's location is mentioned (like "in Alta", "in Tromsø", "in Narvik"), it MUST be assigned to a hub for that specific city
+5. Use accurate real-world coordinates for hubs and activities - do not guess randomly
+6. Calculate approximate distances to verify grouping is correct
+
+GEOGRAPHIC VALIDATION CHECKLIST:
+- Is each activity's stated location actually near the hub city?
+- Are activities from different named cities kept in separate hubs?
+- Would a traveler realistically stay at this hub to do all these activities?
+- Are the coordinates realistic for the actual locations mentioned?{preference_text}
 
 For EACH HUB provide:
-- Hub name (the main city/area to stay in)
+- Hub name (the EXACT main city/area name, e.g., "Tromsø", "Alta", "Narvik" - not generic names)
 - Hub description (2-3 sentences: why it's a good base, what amenities it has, transportation options)
-- Hub coordinates (latitude/longitude - use actual coordinates for the hub city)
-- List of activities near this hub
+- Hub coordinates (latitude/longitude - use ACCURATE real-world coordinates for this specific city/location)
+- Radius in miles (approximate radius to cover all activities in this hub, must be 50-100 miles)
+- List of activities ONLY if they are actually near this hub
 
 For EACH ACTIVITY provide:
 - A clear, engaging title
 - A one-paragraph description (3-5 sentences) highlighting what makes it special
-- Specific location within the destination
+- Specific location (be precise - include city/area name)
 - Estimated duration
-- Coordinates (latitude/longitude - estimate based on location)
-- Image URL if available in the search results
+- Coordinates (latitude/longitude - use accurate coordinates based on the actual location mentioned)
+- Image URL: ONLY include if a valid HTTPS image URL is found in search results. If no image is available, set to null/empty. Do NOT include placeholder text like "No image available"
 - Source URL for more information
 
-Create 2-4 geographic hubs with up to 20 activities total across all hubs.
+BEFORE FINALIZING: Double-check that activities in "City A" are not placed under a hub for "City B".
+
+Create exactly {num_hubs} distinct geographic hub{'s' if num_hubs != 1 else ''} with {num_activities} activities total across all hubs.
+Each hub must have at least 2 activities (never less than 2).
+Distribute activities as evenly as possible across the {num_hubs} hub{'s' if num_hubs != 1 else ''}.
 Focus on popular, highly-rated activities that would appeal to various types of travelers."""
 
         # Now use structured output to format the activities grouped by hubs
         structured_response = self.activity_llm.invoke([
             SystemMessage(content=structured_system_content),
-            HumanMessage(content=f"Here are the search results:\n\n{search_output}\n\nProvide activities grouped by geographic hubs.")
+            HumanMessage(content=f"""Here are the search results:\n\n{search_output}\n\n
+Provide activities grouped by geographic hubs.
+
+REMEMBER:
+- Create exactly {num_hubs} hub{'s' if num_hubs != 1 else ''}
+- Target: {num_activities} total activities distributed across {num_hubs} hub{'s' if num_hubs != 1 else ''}
+- Each hub MUST have at least 2 activities (minimum 2, no exceptions)
+- Create separate hubs for different cities (e.g., Tromsø, Alta, Narvik should be separate hubs)
+- Only group activities that are actually within 50-100 miles of each hub
+- Match activity locations to the correct hub city
+- Use accurate real-world coordinates for each location""")
         ])
 
         return structured_response
@@ -276,6 +319,8 @@ if 'selected_activities' not in st.session_state:
     st.session_state.selected_activities = []
 if 'final_itinerary' not in st.session_state:
     st.session_state.final_itinerary = None
+if 'selected_hub_for_zoom' not in st.session_state:
+    st.session_state.selected_hub_for_zoom = None
 
 st.markdown("""
 ### Plan your perfect trip! 🌍
@@ -298,6 +343,7 @@ with col3:
 
 # Date validation
 date_valid = True
+trip_days = 1
 if start_date and end_date:
     if end_date <= start_date:
         st.error("❌ End date must be after start date")
@@ -307,6 +353,17 @@ if start_date and end_date:
         trip_days = (end_date - start_date).days + 1
         st.info(f"📅 Trip duration: {trip_days} day{'s' if trip_days != 1 else ''}")
 
+# Hub count slider
+max_hubs = max(1, trip_days // 2) if date_valid else 4
+num_hubs = st.slider(
+    "Number of different locations to visit:",
+    min_value=1,
+    max_value=max_hubs,
+    value=min(2, max_hubs),  # Default to 2 or max_hubs if less
+    disabled=not date_valid,
+    help=f"Choose how many different cities/areas you want to base yourself in. More hubs = more travel between locations. Maximum {max_hubs} for a {trip_days}-day trip."
+)
+
 # Preferences input
 preferences = st.text_input(
     "Preferences (optional):",
@@ -315,9 +372,19 @@ preferences = st.text_input(
 )
 
 if st.button("🔍 Search for Activities", type="primary", disabled=not destination or not date_valid):
-    with st.spinner(f"Searching for amazing activities in {destination}..."):
+    # Calculate number of activities based on trip duration (2x number of days)
+    trip_days = (end_date - start_date).days + 1
+    num_activities = trip_days * 2
+
+    with st.spinner(f"Searching for activities in {num_hubs} location{'s' if num_hubs != 1 else ''} in {destination}..."):
         planner = TravelPlanner()
-        st.session_state.activities = planner.find_activities(destination, preferences=preferences)
+        st.session_state.activities = planner.find_activities(
+            destination=destination,
+            preferences=preferences,
+            num_days=trip_days,
+            num_activities=num_activities,
+            num_hubs=num_hubs
+        )
         st.session_state.selected_activities = []
         st.session_state.final_itinerary = None
         st.rerun()
@@ -327,42 +394,186 @@ if st.session_state.activities:
     st.divider()
     st.subheader("🎯 Step 2: Select your activities")
 
+    # Filter out hubs with fewer than 2 activities
+    valid_hubs = [hub for hub in st.session_state.activities.hubs if len(hub.activities) >= 2]
+
     # Count total activities across all hubs
-    total_activities = sum(len(hub.activities) for hub in st.session_state.activities.hubs)
-    st.markdown(f"Found **{total_activities}** activities across **{len(st.session_state.activities.hubs)}** geographic hubs. Select the ones you'd like to include:")
+    total_activities = sum(len(hub.activities) for hub in valid_hubs)
+    st.markdown(f"Found **{total_activities}** activities across **{len(valid_hubs)}** geographic hubs.")
+
+    # Display overview map with all hubs
+    hub_coordinates = []
+    for hub in valid_hubs:
+        if hub.latitude and hub.longitude:
+            hub_coordinates.append({
+                'lat': hub.latitude,
+                'lon': hub.longitude,
+                'hub_name': hub.hub_name
+            })
+
+    if hub_coordinates:
+        st.markdown("**📍 Hub Locations Overview:**")
+
+        # Create two columns: map on left (half width), distance matrix on right
+        col_map, col_distances = st.columns([1, 1])
+
+        with col_map:
+            # Determine map center and zoom based on selected hub or overall view
+            if st.session_state.selected_hub_for_zoom is not None:
+                # Zoom to specific hub
+                selected_hub_data = hub_coordinates[st.session_state.selected_hub_for_zoom]
+                view_state = pdk.ViewState(
+                    latitude=selected_hub_data['lat'],
+                    longitude=selected_hub_data['lon'],
+                    zoom=8,
+                    pitch=0
+                )
+            else:
+                # Show all hubs
+                avg_lat = sum(h['lat'] for h in hub_coordinates) / len(hub_coordinates)
+                avg_lon = sum(h['lon'] for h in hub_coordinates) / len(hub_coordinates)
+                view_state = pdk.ViewState(
+                    latitude=avg_lat,
+                    longitude=avg_lon,
+                    zoom=5,
+                    pitch=0
+                )
+
+            # Create pydeck map with labels
+            hub_map_df = pd.DataFrame(hub_coordinates)
+
+            # Scatterplot layer for hub points
+            scatterplot_layer = pdk.Layer(
+                'ScatterplotLayer',
+                data=hub_map_df,
+                get_position='[lon, lat]',
+                get_color='[200, 30, 0, 160]',
+                get_radius=15000,
+                pickable=True
+            )
+
+            # Text layer for hub names
+            text_layer = pdk.Layer(
+                'TextLayer',
+                data=hub_map_df,
+                get_position='[lon, lat]',
+                get_text='hub_name',
+                get_size=16,
+                get_color='[0, 0, 0]',
+                get_angle=0,
+                get_text_anchor='"middle"',
+                get_alignment_baseline='"bottom"'
+            )
+
+            # Render map (using open street map style, no API key needed)
+            st.pydeck_chart(pdk.Deck(
+                map_style='https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json',
+                initial_view_state=view_state,
+                layers=[scatterplot_layer, text_layer],
+                tooltip={"text": "{hub_name}"}
+            ))
+
+        with col_distances:
+            # Calculate and display distance matrix
+            def haversine_distance(lat1, lon1, lat2, lon2):
+                """Calculate the great circle distance in miles between two points"""
+                R = 3959  # Radius of Earth in miles
+
+                lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+                dlat = lat2 - lat1
+                dlon = lon2 - lon1
+
+                a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+                c = 2 * math.asin(math.sqrt(a))
+
+                return R * c
+
+            st.markdown("**Distances Between Hubs (miles):**")
+
+            # Create distance matrix
+            n_hubs = len(hub_coordinates)
+            if n_hubs > 1:
+                distance_data = []
+                for i in range(n_hubs):
+                    row = [hub_coordinates[i]['hub_name']]
+                    for j in range(n_hubs):
+                        if i == j:
+                            row.append("-")
+                        else:
+                            dist = haversine_distance(
+                                hub_coordinates[i]['lat'], hub_coordinates[i]['lon'],
+                                hub_coordinates[j]['lat'], hub_coordinates[j]['lon']
+                            )
+                            row.append(f"{dist:.0f}")
+                    distance_data.append(row)
+
+                # Create DataFrame
+                columns = ["From \\ To"] + [h['hub_name'] for h in hub_coordinates]
+                distance_df = pd.DataFrame(distance_data, columns=columns)
+                st.dataframe(distance_df, hide_index=True, use_container_width=True)
+            else:
+                st.info("Add more hubs to see distances")
+
+        # Clickable hub names below map
+        st.markdown("**Click to zoom to a hub:**")
+        cols = st.columns(len(hub_coordinates) + 1)
+
+        # Reset button
+        with cols[0]:
+            if st.button("🌍 All Hubs", key="zoom_all", use_container_width=True):
+                st.session_state.selected_hub_for_zoom = None
+                st.rerun()
+
+        # Individual hub buttons
+        for idx, hub_data in enumerate(hub_coordinates):
+            with cols[idx + 1]:
+                if st.button(f"📍 {hub_data['hub_name']}", key=f"zoom_{idx}", use_container_width=True):
+                    st.session_state.selected_hub_for_zoom = idx
+                    st.rerun()
+
+    st.markdown(f"**Select the activities you'd like to include:**")
 
     # Global activity index for unique keys
     global_activity_idx = 0
 
     # Display each hub
-    for hub_idx, hub in enumerate(st.session_state.activities.hubs):
+    for hub_idx, hub in enumerate(valid_hubs):
         st.markdown("---")
-        st.markdown(f"## 🏛️ {hub.hub_name}")
+
+        # Hub name with map icon
+        col_hub_title, col_map_icon = st.columns([0.95, 0.05])
+
+        with col_hub_title:
+            st.markdown(f"## 🏛️ {hub.hub_name}")
+
+        with col_map_icon:
+            # Map icon with popover
+            if hub.latitude and hub.longitude:
+                with st.popover("🗺️"):
+                    st.markdown(f"**{hub.hub_name}**")
+                    st.markdown(f"📍 Coordinates: {hub.latitude:.4f}, {hub.longitude:.4f}")
+                    st.markdown(f"**Radius:** ~{hub.radius_miles} miles")
+
+                    # Create map data - hub as the center point
+                    map_data = pd.DataFrame({
+                        'lat': [hub.latitude],
+                        'lon': [hub.longitude]
+                    })
+
+                    # Display map
+                    st.map(map_data, zoom=8)
 
         # Hub description
         st.info(f"**Base Location:** {hub.hub_description}")
-
-        # Display map for the hub
-        if hub.latitude and hub.longitude:
-            st.markdown(f"📍 **Hub Coordinates:** {hub.latitude:.4f}, {hub.longitude:.4f} | **Radius:** ~{hub.radius_miles} miles")
-
-            # Create map data - hub as the center point
-            map_data = pd.DataFrame({
-                'lat': [hub.latitude],
-                'lon': [hub.longitude]
-            })
-
-            # Display map centered on hub
-            st.map(map_data, zoom=8)
 
         st.markdown(f"### Activities near {hub.hub_name} ({len(hub.activities)} activities)")
 
         # Display activities for this hub
         for activity in hub.activities:
-            # Create two columns for layout
-            col_text, col_image = st.columns([2, 1])
+            # Create layout with checkbox and popover for image
+            col_check, col_image_icon = st.columns([0.95, 0.05])
 
-            with col_text:
+            with col_check:
                 # Checkbox for selection
                 st.checkbox(
                     f"**{activity.title}**",
@@ -370,22 +581,32 @@ if st.session_state.activities:
                     value=False
                 )
 
-                # Activity details
-                st.markdown(f"📍 {activity.location} | ⏱️ {activity.duration}")
-                st.markdown(activity.description)
+            with col_image_icon:
+                # Image preview icon with popover - only show if valid URL exists
+                has_valid_image = (
+                    activity.image_url
+                    and activity.image_url not in ["No image available", ""]
+                    and isinstance(activity.image_url, str)
+                    and activity.image_url.startswith(("http://", "https://"))
+                )
 
-                if activity.source_url:
-                    st.markdown(f"[Learn more]({activity.source_url})")
-
-            with col_image:
-                # Display image if available
-                if activity.image_url and activity.image_url != "No image available":
-                    try:
-                        st.image(activity.image_url, use_container_width=True)
-                    except:
-                        st.info("🖼️ Image unavailable")
+                if has_valid_image:
+                    with st.popover("🖼️"):
+                        try:
+                            st.image(activity.image_url, use_container_width=True, caption=activity.title)
+                        except Exception as e:
+                            st.warning("🖼️ Image temporarily unavailable")
+                            st.caption(activity.title)
                 else:
-                    st.info("🖼️ No image")
+                    # Show empty space to maintain alignment, but no icon
+                    st.write("")
+
+            # Activity details
+            st.markdown(f"📍 {activity.location} | ⏱️ {activity.duration}")
+            st.markdown(activity.description)
+
+            if activity.source_url:
+                st.markdown(f"[Learn more]({activity.source_url})")
 
             st.markdown("")  # Spacing
             global_activity_idx += 1
@@ -393,10 +614,10 @@ if st.session_state.activities:
     # Show selection summary and generate button
     st.divider()
 
-    # Count selected activities
+    # Count selected activities (using same filtered hubs)
     all_activities = []
     global_idx = 0
-    for hub in st.session_state.activities.hubs:
+    for hub in valid_hubs:
         for activity in hub.activities:
             if st.session_state.get(f"activity_{global_idx}"):
                 all_activities.append(activity)
