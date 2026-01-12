@@ -353,9 +353,9 @@ def render_input_form():
         limit = st.number_input(
             "📊 Listings to Analyze",
             min_value=1,
-            max_value=20,
+            max_value=100,
             value=5,
-            help="Number of business listings to analyze (1-20)"
+            help="Number of business listings to analyze (1-100)"
         )
 
     # Load ScraperAPI key from environment

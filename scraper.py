@@ -292,7 +292,11 @@ class BizBuySellScraper:
                     if isinstance(data, dict) and 'description' in data:
                         desc = data['description']
                         if len(desc) > 100 and not desc.rstrip().endswith('...'):
-                            return desc
+                            # Replace newlines with spaces to preserve word separation
+                            desc = re.sub(r'\s*\n\s*', ' ', desc)
+                            # Clean up multiple spaces
+                            desc = re.sub(r' +', ' ', desc)
+                            return desc.strip()
                 except:
                     pass
 
@@ -463,6 +467,14 @@ class BizBuySellScraper:
                     rev_match = re.search(r'(?:gross\s*)?revenue[:\s]*\$?([\d,]+)', card_text, re.IGNORECASE)
                     if rev_match:
                         data.gross_revenue = self._parse_currency(rev_match.group(1))
+
+                    # Extract employee count
+                    emp_match = re.search(r'(?:#\s*)?employees?[:\s]*(\d+)', card_text, re.IGNORECASE)
+                    if emp_match:
+                        try:
+                            data.employees = int(emp_match.group(1))
+                        except ValueError:
+                            pass
 
                     # Extract description
                     if len(parts) > 2:
