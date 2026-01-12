@@ -16,15 +16,22 @@ load_dotenv()
 
 
 def clean_ai_text(text: str) -> str:
-    """Remove backticks and code formatting from AI-generated text."""
+    """Remove formatting characters and escape special characters in AI-generated text."""
     if not text:
         return text
-    # Remove triple backticks code blocks first
-    text = re.sub(r'```[^\n]*\n?', '', text)
-    # Remove inline code backticks (single backticks around text) - greedy
-    text = re.sub(r'`([^`]*)`', r'\1', text)
-    # Remove any remaining standalone backticks
+    # Remove triple backticks but KEEP content (with optional language identifier on first line)
+    text = re.sub(r'```[a-zA-Z]*\n?', '', text)  # Opening ```lang or ```
+    text = re.sub(r'```', '', text)  # Closing ```
+    # Remove double backticks but keep content
+    text = re.sub(r'``', '', text)
+    # Remove single backticks
     text = text.replace('`', '')
+    # Also handle unicode variants of backticks
+    text = text.replace('\u0060', '')  # grave accent
+    text = text.replace('\u2018', '')  # left single quote
+    text = text.replace('\u2019', '')  # right single quote
+    # Escape dollar signs to prevent Streamlit LaTeX rendering
+    text = text.replace('$', '\\$')
     return text
 
 
@@ -265,15 +272,16 @@ st.markdown("""
         background: linear-gradient(90deg, #f59e0b, #fbbf24);
     }
 
-    .stExpander {
+    /* Expander styling */
+    [data-testid="stExpander"] {
         background: #1e293b;
         border: 1px solid #475569;
         border-radius: 12px;
     }
 
-    /* Expander header text */
-    .stExpander summary, .stExpander [data-testid="stExpanderToggleIcon"] {
-        color: #f8fafc !important;
+    /* Expander header text color */
+    [data-testid="stExpander"] [data-testid="stMarkdownContainer"] p {
+        color: #ffffff !important;
     }
 
     /* Info/Success/Warning boxes */
@@ -407,7 +415,7 @@ def render_comparison_table(results: list[AnalysisResult]):
     for r in results:
         ai_badge = " 🤖" if r.ai_enhanced else ""
         with st.expander(f"#{r.rank} - {r.business.name} | Score: {r.overall_score:.0f}/100{ai_badge}"):
-            # Details (collapsible)
+            # Details (collapsible) - includes description
             with st.expander("📍 Details", expanded=False):
                 st.markdown(f"**Location:** {r.business.location or 'Not specified'}")
                 st.markdown(f"**Category:** {r.business.category or 'Not specified'}")
@@ -415,16 +423,16 @@ def render_comparison_table(results: list[AnalysisResult]):
                     st.markdown(f"**Employees:** {r.business.employees}")
                 if r.business.year_established:
                     st.markdown(f"**Established:** {r.business.year_established}")
+                if r.business.description:
+                    st.markdown("**📝 Description:**")
+                    st.markdown(f"{clean_ai_text(r.business.description)}")
 
             # Business Metrics (collapsible)
             with st.expander("📈 Business Metrics", expanded=False):
-                # Price and Cash Flow
                 st.markdown(f"**Asking Price:** {format_currency(r.business.asking_price)}")
                 st.markdown(f"**Cash Flow:** {format_currency(r.business.cash_flow)}")
                 if r.business.gross_revenue:
                     st.markdown(f"**Gross Revenue:** {format_currency(r.business.gross_revenue)}")
-                st.markdown("---")
-                # Calculated metrics
                 metrics_dict = r.metrics.to_dict()
                 for key, value in metrics_dict.items():
                     st.markdown(f"**{key}:** {value}")
@@ -520,12 +528,6 @@ def render_comparison_table(results: list[AnalysisResult]):
                             for item in r.viability.due_diligence_items[:3]:
                                 st.markdown(f"- {clean_ai_text(item)}")
 
-            st.markdown("---")
-
-            if r.business.description:
-                st.markdown("**📝 Description:**")
-                st.markdown(f">{clean_ai_text(r.business.description)}")
-
             st.markdown("")
             st.link_button("🔗 View Full Listing on BizBuySell", r.business.url, use_container_width=True)
 
@@ -588,8 +590,45 @@ def render_top_picks(results: list[AnalysisResult]):
             st.link_button("🔗 View Listing", result.business.url, use_container_width=True)
 
 
+def check_password():
+    """Returns True if the user has entered the correct password."""
+    # Get password from environment variable
+    correct_password = os.getenv("APP_PASSWORD", "")
+
+    # If no password is set, allow access
+    if not correct_password:
+        return True
+
+    # Initialize session state for authentication
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    # If already authenticated, return True
+    if st.session_state.authenticated:
+        return True
+
+    # Show password input
+    st.markdown('<h1 class="hero-title">🔐 Business Opportunity Analyzer</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="hero-subtitle">Please enter the password to access the app</p>', unsafe_allow_html=True)
+
+    password = st.text_input("Password", type="password", key="password_input")
+
+    if st.button("🔓 Login", use_container_width=True):
+        if password == correct_password:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("❌ Incorrect password. Please try again.")
+
+    return False
+
+
 def main():
     """Main application entry point."""
+    # Password protection
+    if not check_password():
+        return
+
     render_header()
 
     # Input form

@@ -32,6 +32,51 @@ def _create_openai_client():
     http_client = httpx.Client(verify=False)
     return OpenAI(api_key=os.getenv("OPENAI_API_KEY"), http_client=http_client)
 
+
+def infer_business_category(name: str, description: str) -> str:
+    """Use OpenAI to infer the business category from name and description."""
+    if not OPENAI_AVAILABLE:
+        return ""
+
+    try:
+        client = _create_openai_client()
+
+        prompt = f"""Based on this business name and description, identify the business category.
+
+Business Name: {name}
+Description: {description[:500] if description else 'No description'}
+
+Respond with ONLY the category name (2-4 words max). Examples:
+- Auto Repair Shop
+- Beauty Salon
+- Landscaping Service
+- HVAC Contractor
+- E-commerce Retail
+- Manufacturing
+- Professional Services
+- Cleaning Service
+- IT Services
+- Wholesale Distribution"""
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You classify businesses into categories. Respond with only the category name, nothing else."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0,
+            max_tokens=20
+        )
+
+        category = response.choices[0].message.content.strip()
+        # Clean up any quotes or extra formatting
+        category = category.strip('"\'').strip()
+        return category if len(category) < 50 else ""
+
+    except Exception:
+        return ""
+
+
 # Check if Tavily is available
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 TAVILY_AVAILABLE = bool(TAVILY_API_KEY and not TAVILY_API_KEY.startswith("your_"))
@@ -677,7 +722,8 @@ Respond in this exact JSON format:
     }},
     "recommendation": "Your detailed 2-4 sentence recommendation for potential buyer"
 }}
-"""
+
+IMPORTANT: In all text values, write in plain text only. Do NOT use backticks, code blocks, or any markdown formatting. Do NOT wrap numbers, prices, or any text in backticks."""
 
         try:
             response = client.chat.completions.create(
@@ -685,7 +731,7 @@ Respond in this exact JSON format:
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are a senior business acquisition analyst. Provide specific, data-driven analysis. Be critical and thorough - buyers depend on your assessment. Respond only with valid JSON."
+                        "content": "You are a senior business acquisition analyst. Provide specific, data-driven analysis. Be critical and thorough - buyers depend on your assessment. Respond only with valid JSON. NEVER use backticks or code formatting in any text values."
                     },
                     {"role": "user", "content": prompt}
                 ],
@@ -753,6 +799,12 @@ Respond in this exact JSON format:
         Returns:
             AnalysisResult with metrics, SWOT, score, viability, and recommendation
         """
+        # Infer category if not specified
+        if use_ai and not business.category:
+            inferred_category = infer_business_category(business.name, business.description)
+            if inferred_category:
+                business.category = inferred_category
+
         metrics = self.calculate_metrics(business)
 
         # Always generate rule-based SWOT first (for cross-checking)
@@ -894,11 +946,16 @@ Based on the above information, provide a comprehensive MARKET ANALYSIS in 3-4 p
 
 4. **Key Considerations**: What should a buyer know about this market segment before purchasing?
 
-Be specific and reference actual data points. Keep the analysis concise but insightful."""
+Be specific and reference actual data points. Keep the analysis concise but insightful.
+
+IMPORTANT: Write in plain text only. Do NOT use backticks, code blocks, or any markdown formatting. Do NOT wrap numbers or text in backticks."""
 
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": "You are a business analyst. Write in plain text only. Never use backticks, code blocks, or markdown formatting."},
+                    {"role": "user", "content": prompt}
+                ],
                 temperature=0.3,
                 max_tokens=800
             )
