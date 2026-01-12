@@ -486,42 +486,40 @@ def render_comparison_table(results: list[AnalysisResult]):
                     with st.expander("📈 Raw Market Research Data", expanded=False):
                         st.markdown(clean_ai_text(r.market_data))
 
-            # Viability Assessment (AI-powered)
+            # Viability Assessment (AI-powered, collapsible)
             if r.viability:
-                st.markdown("---")
-                st.markdown("#### 🔍 AI Viability Assessment")
+                with st.expander("🔍 AI Viability Assessment", expanded=False):
+                    # Viability status
+                    viable_icon = "✅" if r.viability.is_viable else "❌"
+                    st.markdown(f"**Status:** {viable_icon} {'Viable' if r.viability.is_viable else 'Not Viable'} (Confidence: {r.viability.confidence})")
+                    st.markdown(f"**Viability Score:** {r.viability.viability_score}/100")
 
-                # Viability status
-                viable_icon = "✅" if r.viability.is_viable else "❌"
-                st.markdown(f"**Status:** {viable_icon} {'Viable' if r.viability.is_viable else 'Not Viable'} (Confidence: {r.viability.confidence})")
-                st.markdown(f"**Viability Score:** {r.viability.viability_score}/100")
+                    if r.viability.verdict:
+                        st.info(f"**Verdict:** {clean_ai_text(r.viability.verdict)}")
 
-                if r.viability.verdict:
-                    st.info(f"**Verdict:** {clean_ai_text(r.viability.verdict)}")
+                    vcol1, vcol2 = st.columns(2)
 
-                vcol1, vcol2 = st.columns(2)
+                    with vcol1:
+                        if r.viability.red_flags:
+                            st.markdown("**🚩 Red Flags:**")
+                            for flag in r.viability.red_flags[:3]:
+                                st.markdown(f"- ⚠️ {clean_ai_text(flag)}")
 
-                with vcol1:
-                    if r.viability.red_flags:
-                        st.markdown("**🚩 Red Flags:**")
-                        for flag in r.viability.red_flags[:3]:
-                            st.markdown(f"- ⚠️ {clean_ai_text(flag)}")
+                        if r.viability.key_risks:
+                            st.markdown("**⚡ Key Risks:**")
+                            for risk in r.viability.key_risks[:3]:
+                                st.markdown(f"- {clean_ai_text(risk)}")
 
-                    if r.viability.key_risks:
-                        st.markdown("**⚡ Key Risks:**")
-                        for risk in r.viability.key_risks[:3]:
-                            st.markdown(f"- {clean_ai_text(risk)}")
+                    with vcol2:
+                        if r.viability.key_opportunities:
+                            st.markdown("**💡 Key Opportunities:**")
+                            for opp in r.viability.key_opportunities[:3]:
+                                st.markdown(f"- {clean_ai_text(opp)}")
 
-                with vcol2:
-                    if r.viability.key_opportunities:
-                        st.markdown("**💡 Key Opportunities:**")
-                        for opp in r.viability.key_opportunities[:3]:
-                            st.markdown(f"- {clean_ai_text(opp)}")
-
-                    if r.viability.due_diligence_items:
-                        st.markdown("**📋 Due Diligence:**")
-                        for item in r.viability.due_diligence_items[:3]:
-                            st.markdown(f"- {clean_ai_text(item)}")
+                        if r.viability.due_diligence_items:
+                            st.markdown("**📋 Due Diligence:**")
+                            for item in r.viability.due_diligence_items[:3]:
+                                st.markdown(f"- {clean_ai_text(item)}")
 
             st.markdown("---")
 

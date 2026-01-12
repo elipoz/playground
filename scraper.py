@@ -131,7 +131,7 @@ class BusinessData:
 class BizBuySellScraper:
     """Scraper for BizBuySell website."""
 
-    BASE_URL = "https://www.bizbuysell.com"
+    BASE_URL = "https://m.bizbuysell.com"  # Use mobile site for better scraping
 
     HEADERS = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -153,6 +153,10 @@ class BizBuySellScraper:
         # Reduce delay when using ScraperAPI (they handle rate limiting)
         self.delay = 0.5 if scraper_api_key else delay
         self.scraper_api_key = scraper_api_key
+
+    def _to_mobile_url(self, url: str) -> str:
+        """Convert any BizBuySell URL to mobile version for better scraping."""
+        return url.replace('www.bizbuysell.com', 'm.bizbuysell.com')
 
     def _parse_currency(self, text: str) -> Optional[float]:
         """Parse currency string to float."""
@@ -228,7 +232,7 @@ class BizBuySellScraper:
             return ""
 
         # Convert desktop URL to mobile URL
-        mobile_url = listing_url.replace('www.bizbuysell.com', 'm.bizbuysell.com')
+        mobile_url = self._to_mobile_url(listing_url)
 
         try:
             params = {
@@ -277,8 +281,11 @@ class BizBuySellScraper:
         Returns:
             List of BusinessData objects with data from search results
         """
+        # Always use mobile URL for better scraping reliability
+        mobile_url = self._to_mobile_url(parent_url)
+
         try:
-            html = self._fetch_url(parent_url)
+            html = self._fetch_url(mobile_url)
         except Exception as e:
             raise Exception(f"Failed to fetch search page: {e}")
 
@@ -416,6 +423,10 @@ class BizBuySellScraper:
                         if len(part) > 50 and not part.startswith('$'):
                             data.description = part[:2000]
                             break
+
+                # Skip listings without cash flow or gross revenue (require both)
+                if not data.cash_flow or not data.gross_revenue:
+                    continue
 
                 results.append(data)
 
