@@ -165,16 +165,6 @@ class BizBuySellScraper:
         except ValueError:
             return None
 
-    def _parse_number(self, text: str) -> Optional[int]:
-        """Parse number string to int."""
-        if not text:
-            return None
-        cleaned = re.sub(r'[^\d]', '', text)
-        try:
-            return int(cleaned) if cleaned else None
-        except ValueError:
-            return None
-
     def _fetch_url(self, url: str) -> str:
         """Fetch URL with ScraperAPI support for bypassing blocks."""
         errors = []

@@ -4,6 +4,7 @@ A Streamlit app for analyzing business-for-sale listings.
 """
 
 import os
+import re
 import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
@@ -12,6 +13,19 @@ from analyzer import analyze_businesses, AnalysisResult
 
 # Load environment variables from .env file
 load_dotenv()
+
+
+def clean_ai_text(text: str) -> str:
+    """Remove backticks and code formatting from AI-generated text."""
+    if not text:
+        return text
+    # Remove triple backticks code blocks first
+    text = re.sub(r'```[^\n]*\n?', '', text)
+    # Remove inline code backticks (single backticks around text) - greedy
+    text = re.sub(r'`([^`]*)`', r'\1', text)
+    # Remove any remaining standalone backticks
+    text = text.replace('`', '')
+    return text
 
 
 # Page configuration
@@ -309,18 +323,6 @@ def format_currency(value: float) -> str:
         return f"${value:.0f}"
 
 
-def get_score_class(score: float) -> str:
-    """Get CSS class based on score."""
-    if score >= 70:
-        return "score-excellent"
-    elif score >= 55:
-        return "score-good"
-    elif score >= 40:
-        return "score-moderate"
-    else:
-        return "score-poor"
-
-
 def render_header():
     """Render the app header."""
     st.markdown('<h1 class="hero-title">🏢 Business Opportunity Analyzer</h1>', unsafe_allow_html=True)
@@ -432,58 +434,57 @@ def render_comparison_table(results: list[AnalysisResult]):
                 if r.swot.strengths:
                     st.markdown("**💪 Strengths:**")
                     for s in r.swot.strengths[:3]:
-                        st.markdown(f"- {s}")
+                        st.markdown(f"- {clean_ai_text(s)}")
 
                 if r.swot.weaknesses:
                     st.markdown("**⚠️ Weaknesses:**")
                     for w in r.swot.weaknesses[:3]:
-                        st.markdown(f"- {w}")
+                        st.markdown(f"- {clean_ai_text(w)}")
 
                 if r.swot.opportunities:
                     st.markdown("**🚀 Opportunities:**")
                     for o in r.swot.opportunities[:3]:
-                        st.markdown(f"- {o}")
+                        st.markdown(f"- {clean_ai_text(o)}")
 
                 if r.swot.threats:
                     st.markdown("**🔴 Threats:**")
                     for t in r.swot.threats[:3]:
-                        st.markdown(f"- {t}")
+                        st.markdown(f"- {clean_ai_text(t)}")
 
             # Competitive Analysis (AI-powered with Tavily market data)
             if r.competitive or r.market_data:
                 st.markdown("---")
-                st.markdown("#### 🏆 Competitive Analysis")
-
+                # Competitive Analysis (collapsible)
                 if r.competitive:
-                    if r.competitive.market_position:
-                        st.markdown(f"**📊 Market Position:** {r.competitive.market_position}")
+                    with st.expander("🏆 Competitive Analysis", expanded=False):
+                        if r.competitive.market_position:
+                            st.markdown(f"**📊 Market Position:** {clean_ai_text(r.competitive.market_position)}")
 
-                    if r.competitive.valuation_assessment:
-                        st.markdown(f"**💰 Valuation Assessment:** {r.competitive.valuation_assessment}")
+                        if r.competitive.valuation_assessment:
+                            st.markdown(f"**💰 Valuation Assessment:** {clean_ai_text(r.competitive.valuation_assessment)}")
 
-                    ccol1, ccol2 = st.columns(2)
+                        ccol1, ccol2 = st.columns(2)
 
-                    with ccol1:
-                        if r.competitive.competitive_advantages:
-                            st.markdown("**✅ Competitive Advantages:**")
-                            for adv in r.competitive.competitive_advantages[:4]:
-                                st.markdown(f"- {adv}")
+                        with ccol1:
+                            if r.competitive.competitive_advantages:
+                                st.markdown("**✅ Competitive Advantages:**")
+                                for adv in r.competitive.competitive_advantages[:4]:
+                                    st.markdown(f"- {clean_ai_text(adv)}")
 
-                    with ccol2:
-                        if r.competitive.competitive_threats:
-                            st.markdown("**⚠️ Competitive Threats:**")
-                            for threat in r.competitive.competitive_threats[:4]:
-                                st.markdown(f"- {threat}")
+                        with ccol2:
+                            if r.competitive.competitive_threats:
+                                st.markdown("**⚠️ Competitive Threats:**")
+                                for threat in r.competitive.competitive_threats[:4]:
+                                    st.markdown(f"- {clean_ai_text(threat)}")
 
-                # Show AI-generated market analysis
+                # Market Analysis (collapsible)
                 if r.market_analysis:
-                    st.markdown("---")
-                    st.markdown("#### 📈 Market Analysis")
-                    st.markdown(r.market_analysis)
+                    with st.expander("📈 Market Analysis", expanded=False):
+                        st.markdown(clean_ai_text(r.market_analysis))
                 elif r.market_data:
                     # Fallback to raw data if AI analysis not available
-                    with st.expander("📈 Raw Market Research Data"):
-                        st.markdown(r.market_data)
+                    with st.expander("📈 Raw Market Research Data", expanded=False):
+                        st.markdown(clean_ai_text(r.market_data))
 
             # Viability Assessment (AI-powered)
             if r.viability:
@@ -496,7 +497,7 @@ def render_comparison_table(results: list[AnalysisResult]):
                 st.markdown(f"**Viability Score:** {r.viability.viability_score}/100")
 
                 if r.viability.verdict:
-                    st.info(f"**Verdict:** {r.viability.verdict}")
+                    st.info(f"**Verdict:** {clean_ai_text(r.viability.verdict)}")
 
                 vcol1, vcol2 = st.columns(2)
 
@@ -504,23 +505,23 @@ def render_comparison_table(results: list[AnalysisResult]):
                     if r.viability.red_flags:
                         st.markdown("**🚩 Red Flags:**")
                         for flag in r.viability.red_flags[:3]:
-                            st.markdown(f"- ⚠️ {flag}")
+                            st.markdown(f"- ⚠️ {clean_ai_text(flag)}")
 
                     if r.viability.key_risks:
                         st.markdown("**⚡ Key Risks:**")
                         for risk in r.viability.key_risks[:3]:
-                            st.markdown(f"- {risk}")
+                            st.markdown(f"- {clean_ai_text(risk)}")
 
                 with vcol2:
                     if r.viability.key_opportunities:
                         st.markdown("**💡 Key Opportunities:**")
                         for opp in r.viability.key_opportunities[:3]:
-                            st.markdown(f"- {opp}")
+                            st.markdown(f"- {clean_ai_text(opp)}")
 
                     if r.viability.due_diligence_items:
                         st.markdown("**📋 Due Diligence:**")
                         for item in r.viability.due_diligence_items[:3]:
-                            st.markdown(f"- {item}")
+                            st.markdown(f"- {clean_ai_text(item)}")
 
             st.markdown("---")
 
