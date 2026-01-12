@@ -15,6 +15,7 @@ from typing import Optional
 from dataclasses import dataclass, field
 from urllib.parse import urlencode
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 load_dotenv()
 
@@ -328,7 +329,8 @@ class BizBuySellScraper:
         results = []
         seen_urls = set()
         seen_names = set()  # Track business names to avoid duplicates
-        excluded_count = 0
+        excluded_count = 0  # Business type exclusions (restaurants, dental, etc.)
+        no_cashflow_count = 0  # Skipped due to missing cash flow
         total_checked = 0
         current_page = 1
         max_pages = 10  # Safety limit to prevent infinite loops
@@ -425,7 +427,8 @@ class BizBuySellScraper:
                     # Filter out excluded business types
                     if filter_excluded:
                         if filter_callback:
-                            filter_callback(name[:30], total_checked, excluded_count)
+                            total_skipped = excluded_count + no_cashflow_count
+                            filter_callback(name[:30], total_checked, total_skipped)
 
                         classification = _classify_with_ai(name, description)
                         if classification.get("exclude", False):
@@ -498,6 +501,7 @@ class BizBuySellScraper:
 
                     # Skip listings without cash flow (required for ROI calculation)
                     if not data.cash_flow:
+                        no_cashflow_count += 1
                         continue
 
                     results.append(data)
@@ -568,17 +572,29 @@ def scrape_listings(
     if not results:
         raise Exception("No business listings found on the page. The page structure may have changed or all listings were filtered out.")
 
-    # Fetch full descriptions from individual listing pages
+    # Fetch full descriptions from individual listing pages (parallel)
     if fetch_full_details and scraper_api_key:
-        for i, business in enumerate(results):
-            if progress_callback:
-                progress_callback(i, len(results), f"Fetching details for {business.name[:30]}...")
+        completed = 0
+        total = len(results)
 
+        def fetch_description(business):
+            """Fetch full description for a single business."""
             full_desc = scraper.fetch_full_description(business.url)
             if full_desc and len(full_desc) > len(business.description or ""):
                 business.description = full_desc
+            return business
 
-            time.sleep(0.3)  # Small delay between requests
+        if progress_callback:
+            progress_callback(0, total, f"Fetching details (0/{total})...")
+
+        # Use parallel fetching with max 5 concurrent requests
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(fetch_description, b): b for b in results}
+
+            for future in as_completed(futures):
+                completed += 1
+                if progress_callback:
+                    progress_callback(completed, total, f"Fetching details ({completed}/{total})...")
 
     if progress_callback:
         progress_callback(len(results), len(results), f"Found {len(results)} qualifying listings!")

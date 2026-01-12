@@ -11,6 +11,7 @@ import urllib3
 from dataclasses import dataclass, field
 from typing import Optional
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from scraper import BusinessData
 
 load_dotenv()
@@ -1003,6 +1004,7 @@ IMPORTANT: Write in plain text only. Do NOT use backticks, code blocks, or any m
 def analyze_businesses(businesses: list[BusinessData], progress_callback=None) -> list[AnalysisResult]:
     """
     Analyze a list of businesses and return ranked results.
+    Uses parallel processing for faster analysis.
 
     Args:
         businesses: List of BusinessData objects
@@ -1014,24 +1016,35 @@ def analyze_businesses(businesses: list[BusinessData], progress_callback=None) -
     analyzer = BusinessAnalyzer()
     results = []
     total = len(businesses)
+    completed = 0
 
-    for i, business in enumerate(businesses):
-        if progress_callback:
-            progress_callback(i, total, f"Analyzing {business.name[:30]}...")
-
+    def analyze_single(business):
+        """Analyze a single business with fallback."""
         try:
-            result = analyzer.analyze(business)
-            results.append(result)
+            return analyzer.analyze(business)
         except Exception as e:
-            # If analysis fails, create a basic result without AI
             print(f"Analysis failed for {business.name}: {e}")
             try:
-                result = analyzer.analyze(business, use_ai=False)
-                results.append(result)
+                return analyzer.analyze(business, use_ai=False)
             except Exception as e2:
                 print(f"Fallback analysis also failed: {e2}")
-                # Skip this business
-                continue
+                return None
+
+    if progress_callback:
+        progress_callback(0, total, f"Analyzing businesses (0/{total})...")
+
+    # Use parallel analysis with max 4 concurrent workers (to avoid OpenAI rate limits)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(analyze_single, b): b for b in businesses}
+
+        for future in as_completed(futures):
+            completed += 1
+            result = future.result()
+            if result:
+                results.append(result)
+
+            if progress_callback:
+                progress_callback(completed, total, f"Analyzing businesses ({completed}/{total})...")
 
     if progress_callback:
         progress_callback(total, total, "Analysis complete!")
