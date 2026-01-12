@@ -327,6 +327,7 @@ class BizBuySellScraper:
         """
         results = []
         seen_urls = set()
+        seen_names = set()  # Track business names to avoid duplicates
         excluded_count = 0
         total_checked = 0
         current_page = 1
@@ -392,7 +393,7 @@ class BizBuySellScraper:
                     if url.startswith('/'):
                         url = self.BASE_URL + url
 
-                    # Skip duplicates (important for pagination)
+                    # Skip duplicate URLs (important for pagination)
                     if url in seen_urls:
                         continue
                     seen_urls.add(url)
@@ -403,6 +404,12 @@ class BizBuySellScraper:
                     # Extract name/title - usually first part before location
                     parts = card_text.split(' | ')
                     name = parts[0] if parts else "Unknown Business"
+
+                    # Skip duplicate business names (same listing appearing multiple times)
+                    name_normalized = name.lower().strip()
+                    if name_normalized in seen_names:
+                        continue
+                    seen_names.add(name_normalized)
 
                     # Extract description for filtering
                     description = ""

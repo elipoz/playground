@@ -5,11 +5,21 @@ A Streamlit app for analyzing business-for-sale listings.
 
 import os
 import re
+import io
 import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
 from scraper import scrape_listings
 from analyzer import analyze_businesses, AnalysisResult
+
+# Try to import python-docx for Word export
+try:
+    from docx import Document
+    from docx.shared import Inches, Pt
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
 
 # Load environment variables from .env file
 load_dotenv()
@@ -33,6 +43,232 @@ def clean_ai_text(text: str) -> str:
     # Escape dollar signs to prevent Streamlit LaTeX rendering
     text = text.replace('$', '\\$')
     return text
+
+
+def clean_text_for_doc(text: str) -> str:
+    """Clean text for Word document (no escaping needed)."""
+    if not text:
+        return text
+    # Remove backticks
+    text = re.sub(r'```[a-zA-Z]*\n?', '', text)
+    text = re.sub(r'```', '', text)
+    text = re.sub(r'``', '', text)
+    text = text.replace('`', '')
+    text = text.replace('\u0060', '')
+    text = text.replace('\u2018', "'")
+    text = text.replace('\u2019', "'")
+    return text
+
+
+def sanitize_for_csv(text: str) -> str:
+    """Sanitize text for CSV export - replace special characters with ASCII equivalents."""
+    if not text:
+        return text
+    # Replace emojis with text equivalents
+    replacements = {
+        '🌟': '[HIGHLY RECOMMENDED]',
+        '✅': '[RECOMMENDED]',
+        '⚠️': '[CAUTION]',
+        '⚡': '[HIGH RISK]',
+        '❌': '[NOT RECOMMENDED]',
+        '💪': '',
+        '🚀': '',
+        '🔴': '',
+        '📊': '',
+        '💰': '',
+        '📈': '',
+        '🎯': '',
+        '🏆': '',
+        '📍': '',
+        '📝': '',
+        '🔍': '',
+        '🚩': '',
+        '💡': '',
+        '📋': '',
+        '🤖': '',
+        '—': '-',  # em dash
+        '–': '-',  # en dash
+        '"': '"',  # smart quotes
+        '"': '"',
+        ''': "'",
+        ''': "'",
+        '…': '...',
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    # Remove any remaining non-ASCII characters
+    text = text.encode('ascii', 'ignore').decode('ascii')
+    return text.strip()
+
+
+def generate_word_report(results: list) -> bytes:
+    """Generate a Word document with the full analysis report."""
+    if not DOCX_AVAILABLE:
+        return None
+
+    doc = Document()
+
+    # Title
+    title = doc.add_heading('Business Opportunity Analysis Report', 0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # Summary section
+    doc.add_heading('Executive Summary', level=1)
+    doc.add_paragraph(f"Total businesses analyzed: {len(results)}")
+    if results:
+        avg_score = sum(r.overall_score for r in results) / len(results)
+        doc.add_paragraph(f"Average score: {avg_score:.1f}/100")
+
+        # Top 3 Recommendations
+        doc.add_heading('Top 3 Recommendations', level=2)
+        top_3 = results[:3]
+        medals = ["1st", "2nd", "3rd"]
+
+        for i, r in enumerate(top_3):
+            doc.add_heading(f"{medals[i]} Place: {r.business.name}", level=3)
+            doc.add_paragraph(f"Score: {r.overall_score:.0f}/100")
+            doc.add_paragraph(f"Asking Price: {format_currency(r.business.asking_price)}")
+            doc.add_paragraph(f"Cash Flow: {format_currency(r.business.cash_flow)}")
+            if r.metrics.roi_percent:
+                doc.add_paragraph(f"ROI: {r.metrics.roi_percent:.1f}%")
+
+            # Top strength
+            if r.swot.strengths:
+                doc.add_paragraph(f"Top Strength: {clean_text_for_doc(r.swot.strengths[0])}")
+
+            # Main risk
+            if r.swot.weaknesses:
+                doc.add_paragraph(f"Main Risk: {clean_text_for_doc(r.swot.weaknesses[0])}")
+            elif r.viability and r.viability.key_risks:
+                doc.add_paragraph(f"Main Risk: {clean_text_for_doc(r.viability.key_risks[0])}")
+
+            # Recommendation summary
+            doc.add_paragraph(f"Verdict: {clean_text_for_doc(r.recommendation)}")
+            doc.add_paragraph(f"Listing URL: {r.business.url}")
+            doc.add_paragraph("")  # Spacing
+
+    doc.add_page_break()
+
+    # Individual business analyses
+    for r in results:
+        # Business header
+        doc.add_heading(f"#{r.rank} - {r.business.name}", level=1)
+        doc.add_paragraph(f"Overall Score: {r.overall_score:.0f}/100")
+        doc.add_paragraph(f"URL: {r.business.url}")
+
+        # Details section
+        doc.add_heading('Details', level=2)
+        doc.add_paragraph(f"Location: {r.business.location or 'Not specified'}")
+        doc.add_paragraph(f"Category: {r.business.category or 'Not specified'}")
+        if r.business.employees:
+            doc.add_paragraph(f"Employees: {r.business.employees}")
+        if r.business.year_established:
+            doc.add_paragraph(f"Established: {r.business.year_established}")
+
+        if r.business.description:
+            doc.add_heading('Description', level=3)
+            doc.add_paragraph(clean_text_for_doc(r.business.description))
+
+        # Business Metrics
+        doc.add_heading('Business Metrics', level=2)
+        doc.add_paragraph(f"Asking Price: {format_currency(r.business.asking_price)}")
+        doc.add_paragraph(f"Cash Flow: {format_currency(r.business.cash_flow)}")
+        if r.business.gross_revenue:
+            doc.add_paragraph(f"Gross Revenue: {format_currency(r.business.gross_revenue)}")
+
+        metrics_dict = r.metrics.to_dict()
+        for key, value in metrics_dict.items():
+            doc.add_paragraph(f"{key}: {value}")
+
+        # SWOT Analysis
+        doc.add_heading('SWOT Analysis', level=2)
+
+        if r.swot.strengths:
+            doc.add_heading('Strengths', level=3)
+            for s in r.swot.strengths:
+                doc.add_paragraph(f"• {clean_text_for_doc(s)}", style='List Bullet')
+
+        if r.swot.weaknesses:
+            doc.add_heading('Weaknesses', level=3)
+            for w in r.swot.weaknesses:
+                doc.add_paragraph(f"• {clean_text_for_doc(w)}", style='List Bullet')
+
+        if r.swot.opportunities:
+            doc.add_heading('Opportunities', level=3)
+            for o in r.swot.opportunities:
+                doc.add_paragraph(f"• {clean_text_for_doc(o)}", style='List Bullet')
+
+        if r.swot.threats:
+            doc.add_heading('Threats', level=3)
+            for t in r.swot.threats:
+                doc.add_paragraph(f"• {clean_text_for_doc(t)}", style='List Bullet')
+
+        # Competitive Analysis
+        if r.competitive:
+            doc.add_heading('Competitive Analysis', level=2)
+            if r.competitive.market_position:
+                doc.add_paragraph(f"Market Position: {clean_text_for_doc(r.competitive.market_position)}")
+            if r.competitive.valuation_assessment:
+                doc.add_paragraph(f"Valuation Assessment: {clean_text_for_doc(r.competitive.valuation_assessment)}")
+
+            if r.competitive.competitive_advantages:
+                doc.add_heading('Competitive Advantages', level=3)
+                for adv in r.competitive.competitive_advantages:
+                    doc.add_paragraph(f"• {clean_text_for_doc(adv)}", style='List Bullet')
+
+            if r.competitive.competitive_threats:
+                doc.add_heading('Competitive Threats', level=3)
+                for threat in r.competitive.competitive_threats:
+                    doc.add_paragraph(f"• {clean_text_for_doc(threat)}", style='List Bullet')
+
+        # Market Analysis
+        if r.market_analysis:
+            doc.add_heading('Market Analysis', level=2)
+            doc.add_paragraph(clean_text_for_doc(r.market_analysis))
+
+        # Viability Assessment
+        if r.viability:
+            doc.add_heading('Viability Assessment', level=2)
+            viable_status = "Viable" if r.viability.is_viable else "Not Viable"
+            doc.add_paragraph(f"Status: {viable_status} (Confidence: {r.viability.confidence})")
+            doc.add_paragraph(f"Viability Score: {r.viability.viability_score}/100")
+
+            if r.viability.verdict:
+                doc.add_paragraph(f"Verdict: {clean_text_for_doc(r.viability.verdict)}")
+
+            if r.viability.red_flags:
+                doc.add_heading('Red Flags', level=3)
+                for flag in r.viability.red_flags:
+                    doc.add_paragraph(f"• {clean_text_for_doc(flag)}", style='List Bullet')
+
+            if r.viability.key_risks:
+                doc.add_heading('Key Risks', level=3)
+                for risk in r.viability.key_risks:
+                    doc.add_paragraph(f"• {clean_text_for_doc(risk)}", style='List Bullet')
+
+            if r.viability.key_opportunities:
+                doc.add_heading('Key Opportunities', level=3)
+                for opp in r.viability.key_opportunities:
+                    doc.add_paragraph(f"• {clean_text_for_doc(opp)}", style='List Bullet')
+
+            if r.viability.due_diligence_items:
+                doc.add_heading('Due Diligence Items', level=3)
+                for item in r.viability.due_diligence_items:
+                    doc.add_paragraph(f"• {clean_text_for_doc(item)}", style='List Bullet')
+
+        # Recommendation
+        doc.add_heading('Recommendation', level=2)
+        doc.add_paragraph(clean_text_for_doc(r.recommendation))
+
+        # Page break between businesses (except for last one)
+        if r.rank < len(results):
+            doc.add_page_break()
+
+    # Save to bytes
+    doc_bytes = io.BytesIO()
+    doc.save(doc_bytes)
+    doc_bytes.seek(0)
+    return doc_bytes.getvalue()
 
 
 # Page configuration
@@ -739,11 +975,14 @@ def main():
         st.markdown("---")
         st.markdown("### 📥 Export Data")
 
+        col_csv, col_word = st.columns(2)
+
+        # CSV Export (sanitized for compatibility)
         export_data = []
         for r in results:
             export_data.append({
                 "Rank": r.rank,
-                "Business Name": r.business.name,
+                "Business Name": sanitize_for_csv(r.business.name),
                 "URL": r.business.url,
                 "Asking Price": r.business.asking_price,
                 "Cash Flow": r.business.cash_flow,
@@ -751,23 +990,39 @@ def main():
                 "ROI %": r.metrics.roi_percent,
                 "Payback Years": r.metrics.payback_years,
                 "Score": r.overall_score,
-                "Strengths": "; ".join(r.swot.strengths),
-                "Weaknesses": "; ".join(r.swot.weaknesses),
-                "Opportunities": "; ".join(r.swot.opportunities),
-                "Threats": "; ".join(r.swot.threats),
-                "Recommendation": r.recommendation,
+                "Strengths": sanitize_for_csv("; ".join(r.swot.strengths)),
+                "Weaknesses": sanitize_for_csv("; ".join(r.swot.weaknesses)),
+                "Opportunities": sanitize_for_csv("; ".join(r.swot.opportunities)),
+                "Threats": sanitize_for_csv("; ".join(r.swot.threats)),
+                "Recommendation": sanitize_for_csv(r.recommendation),
             })
 
         export_df = pd.DataFrame(export_data)
         csv = export_df.to_csv(index=False)
 
-        st.download_button(
-            label="📥 Download CSV Report",
-            data=csv,
-            file_name="business_analysis_report.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
+        with col_csv:
+            st.download_button(
+                label="📥 Download CSV",
+                data=csv,
+                file_name="business_analysis_report.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
+        # Word Export
+        with col_word:
+            if DOCX_AVAILABLE:
+                word_doc = generate_word_report(results)
+                if word_doc:
+                    st.download_button(
+                        label="📄 Download Word Report",
+                        data=word_doc,
+                        file_name="business_analysis_report.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        use_container_width=True
+                    )
+            else:
+                st.caption("Word export requires python-docx package")
 
 
 if __name__ == "__main__":
