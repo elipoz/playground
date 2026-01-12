@@ -58,16 +58,23 @@ def _classify_with_ai(name: str, description: str) -> dict:
     """
     Use OpenAI to classify if business should be excluded.
     Returns dict with 'exclude' (bool) and 'reason' (str).
+
+    ALWAYS checks keywords first - if keyword match found, skip AI call.
     """
+    # ALWAYS check keywords first - this is fast and reliable
+    if _is_excluded_by_keywords(name, description):
+        return {"exclude": True, "reason": "keyword match"}
+
+    # If no keyword match, try AI classification for edge cases
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key or api_key.startswith("your_"):
-        # Fall back to keyword matching if no API key
-        exclude = _is_excluded_by_keywords(name, description)
-        return {"exclude": exclude, "reason": "keyword match" if exclude else ""}
+        return {"exclude": False, "reason": ""}
 
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=api_key)
+        # Use SSL workaround for environments with certificate issues
+        http_client = httpx.Client(verify=False)
+        client = OpenAI(api_key=api_key, http_client=http_client)
 
         prompt = f"""Classify this business. Should it be EXCLUDED from an investment analysis?
 
@@ -99,10 +106,9 @@ Respond JSON only: {{"exclude": true/false, "reason": "brief reason if excluded"
 
         return json.loads(content)
 
-    except Exception as e:
-        # Fall back to keyword matching on error
-        exclude = _is_excluded_by_keywords(name, description)
-        return {"exclude": exclude, "reason": f"keyword fallback" if exclude else ""}
+    except Exception:
+        # AI failed, but we already checked keywords above
+        return {"exclude": False, "reason": ""}
 
 
 @dataclass
