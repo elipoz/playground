@@ -415,10 +415,11 @@ def render_comparison_table(results: list[AnalysisResult]):
             col1, col2 = st.columns(2)
 
             with col1:
-                st.markdown("#### 📈 Business Metrics")
-                metrics_dict = r.metrics.to_dict()
-                for key, value in metrics_dict.items():
-                    st.markdown(f"**{key}:** {value}")
+                # Business Metrics (collapsible)
+                with st.expander("📈 Business Metrics", expanded=False):
+                    metrics_dict = r.metrics.to_dict()
+                    for key, value in metrics_dict.items():
+                        st.markdown(f"**{key}:** {value}")
 
                 st.markdown("#### 📍 Details")
                 st.markdown(f"**Location:** {r.business.location or 'Not specified'}")
@@ -429,27 +430,27 @@ def render_comparison_table(results: list[AnalysisResult]):
                     st.markdown(f"**Established:** {r.business.year_established}")
 
             with col2:
-                st.markdown("#### 🎯 SWOT Analysis")
+                # SWOT Analysis (collapsible)
+                with st.expander("🎯 SWOT Analysis", expanded=False):
+                    if r.swot.strengths:
+                        st.markdown("**💪 Strengths:**")
+                        for s in r.swot.strengths[:3]:
+                            st.markdown(f"- {clean_ai_text(s)}")
 
-                if r.swot.strengths:
-                    st.markdown("**💪 Strengths:**")
-                    for s in r.swot.strengths[:3]:
-                        st.markdown(f"- {clean_ai_text(s)}")
+                    if r.swot.weaknesses:
+                        st.markdown("**⚠️ Weaknesses:**")
+                        for w in r.swot.weaknesses[:3]:
+                            st.markdown(f"- {clean_ai_text(w)}")
 
-                if r.swot.weaknesses:
-                    st.markdown("**⚠️ Weaknesses:**")
-                    for w in r.swot.weaknesses[:3]:
-                        st.markdown(f"- {clean_ai_text(w)}")
+                    if r.swot.opportunities:
+                        st.markdown("**🚀 Opportunities:**")
+                        for o in r.swot.opportunities[:3]:
+                            st.markdown(f"- {clean_ai_text(o)}")
 
-                if r.swot.opportunities:
-                    st.markdown("**🚀 Opportunities:**")
-                    for o in r.swot.opportunities[:3]:
-                        st.markdown(f"- {clean_ai_text(o)}")
-
-                if r.swot.threats:
-                    st.markdown("**🔴 Threats:**")
-                    for t in r.swot.threats[:3]:
-                        st.markdown(f"- {clean_ai_text(t)}")
+                    if r.swot.threats:
+                        st.markdown("**🔴 Threats:**")
+                        for t in r.swot.threats[:3]:
+                            st.markdown(f"- {clean_ai_text(t)}")
 
             # Competitive Analysis (AI-powered with Tavily market data)
             if r.competitive or r.market_data:
@@ -525,7 +526,7 @@ def render_comparison_table(results: list[AnalysisResult]):
 
             if r.business.description:
                 st.markdown("**📝 Description:**")
-                st.markdown(f">{r.business.description}")
+                st.markdown(f">{clean_ai_text(r.business.description)}")
 
             st.markdown("")
             st.link_button("🔗 View Full Listing on BizBuySell", r.business.url, use_container_width=True)
