@@ -7,7 +7,7 @@ import os
 import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
-from scraper import scrape_listings, BusinessData
+from scraper import scrape_listings
 from analyzer import analyze_businesses, AnalysisResult
 
 # Load environment variables from .env file
@@ -326,12 +326,6 @@ def render_header():
     st.markdown('<h1 class="hero-title">🏢 Business Opportunity Analyzer</h1>', unsafe_allow_html=True)
     st.markdown('<p class="hero-subtitle">AI-powered analysis of BizBuySell listings • SWOT • Metrics • Rankings</p>', unsafe_allow_html=True)
 
-    # Show AI status
-    openai_key = os.getenv("OPENAI_API_KEY", "")
-    if openai_key and not openai_key.startswith("your_"):
-        st.caption("🤖 OpenAI key configured (may require network access for AI features)")
-    else:
-        st.caption("⚠️ Add OPENAI_API_KEY to .env for AI-enhanced analysis")
 
 
 def render_input_form():
@@ -454,6 +448,42 @@ def render_comparison_table(results: list[AnalysisResult]):
                     st.markdown("**🔴 Threats:**")
                     for t in r.swot.threats[:3]:
                         st.markdown(f"- {t}")
+
+            # Competitive Analysis (AI-powered with Tavily market data)
+            if r.competitive or r.market_data:
+                st.markdown("---")
+                st.markdown("#### 🏆 Competitive Analysis")
+
+                if r.competitive:
+                    if r.competitive.market_position:
+                        st.markdown(f"**📊 Market Position:** {r.competitive.market_position}")
+
+                    if r.competitive.valuation_assessment:
+                        st.markdown(f"**💰 Valuation Assessment:** {r.competitive.valuation_assessment}")
+
+                    ccol1, ccol2 = st.columns(2)
+
+                    with ccol1:
+                        if r.competitive.competitive_advantages:
+                            st.markdown("**✅ Competitive Advantages:**")
+                            for adv in r.competitive.competitive_advantages[:4]:
+                                st.markdown(f"- {adv}")
+
+                    with ccol2:
+                        if r.competitive.competitive_threats:
+                            st.markdown("**⚠️ Competitive Threats:**")
+                            for threat in r.competitive.competitive_threats[:4]:
+                                st.markdown(f"- {threat}")
+
+                # Show AI-generated market analysis
+                if r.market_analysis:
+                    st.markdown("---")
+                    st.markdown("#### 📈 Market Analysis")
+                    st.markdown(r.market_analysis)
+                elif r.market_data:
+                    # Fallback to raw data if AI analysis not available
+                    with st.expander("📈 Raw Market Research Data"):
+                        st.markdown(r.market_data)
 
             # Viability Assessment (AI-powered)
             if r.viability:

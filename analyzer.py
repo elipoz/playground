@@ -1,11 +1,13 @@
 """
 Business analysis module for evaluating opportunities.
 Includes metrics calculation, SWOT analysis, and scoring.
-Uses OpenAI for intelligent analysis.
+Uses OpenAI for intelligent analysis and Tavily for market research.
 """
 
 import os
 import json
+import requests
+import urllib3
 from dataclasses import dataclass, field
 from typing import Optional
 from dotenv import load_dotenv
@@ -13,12 +15,74 @@ from scraper import BusinessData
 
 load_dotenv()
 
+# Disable SSL warnings for Tavily
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 # Try to import OpenAI
 try:
     from openai import OpenAI
+    import httpx
     OPENAI_AVAILABLE = bool(os.getenv("OPENAI_API_KEY"))
 except ImportError:
     OPENAI_AVAILABLE = False
+
+
+def _create_openai_client():
+    """Create OpenAI client with SSL workaround for problematic environments."""
+    http_client = httpx.Client(verify=False)
+    return OpenAI(api_key=os.getenv("OPENAI_API_KEY"), http_client=http_client)
+
+# Check if Tavily is available
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+TAVILY_AVAILABLE = bool(TAVILY_API_KEY and not TAVILY_API_KEY.startswith("your_"))
+
+
+def search_market_data(business_type: str, asking_price: float = None) -> str:
+    """
+    Use Tavily to search for market comparison data about similar businesses.
+    Returns a summary of market data for the business type.
+    """
+    if not TAVILY_AVAILABLE:
+        return ""
+
+    # Build search query focused on industry metrics
+    query = f"{business_type} profit margins industry average valuation multiples"
+
+    try:
+        url = "https://api.tavily.com/search"
+        payload = {
+            "api_key": TAVILY_API_KEY,
+            "query": query,
+            "search_depth": "advanced",
+            "max_results": 5,
+            "include_answer": True,
+        }
+
+        response = requests.post(url, json=payload, timeout=20, verify=False)
+
+        if response.status_code == 200:
+            data = response.json()
+
+            # Start with answer if available
+            market_info_parts = []
+            answer = data.get("answer", "")
+            if answer:
+                market_info_parts.append(f"Summary: {answer}")
+
+            # Get key insights from results
+            for r in data.get("results", [])[:3]:
+                content = r.get("content", "")
+                if content and len(content) > 50:
+                    # Clean up and truncate content
+                    snippet = content[:250].strip()
+                    if snippet:
+                        market_info_parts.append(f"- {snippet}")
+
+            if market_info_parts:
+                return "\n".join(market_info_parts)
+        return ""
+    except Exception:
+        return ""
 
 
 @dataclass
@@ -75,6 +139,15 @@ class ViabilityAssessment:
 
 
 @dataclass
+class CompetitiveAnalysis:
+    """AI-generated competitive analysis."""
+    market_position: str = ""
+    valuation_assessment: str = ""
+    competitive_advantages: list = field(default_factory=list)
+    competitive_threats: list = field(default_factory=list)
+
+
+@dataclass
 class AnalysisResult:
     """Complete analysis result for a business."""
     business: BusinessData
@@ -85,6 +158,9 @@ class AnalysisResult:
     rank: int = 0
     viability: Optional[ViabilityAssessment] = None
     ai_enhanced: bool = False
+    market_data: str = ""  # Raw market research data from Tavily
+    market_analysis: str = ""  # AI-synthesized comprehensive market analysis
+    competitive: Optional[CompetitiveAnalysis] = None  # AI-generated competitive analysis
 
 
 class BusinessAnalyzer:
@@ -446,8 +522,49 @@ class BusinessAnalyzer:
         desc_str = business.description[:1500] if business.description else "No description available"
         highlights_str = ", ".join(business.highlights[:5]) if business.highlights else "None listed"
 
+        # Infer business type from name for deeper analysis
+        business_type_hint = ""
+        name_lower = business.name.lower()
+        if any(x in name_lower for x in ['auto', 'car', 'mechanic', 'repair shop', 'automotive']):
+            business_type_hint = "This appears to be an automotive service business."
+        elif any(x in name_lower for x in ['salon', 'spa', 'beauty', 'hair', 'nail']):
+            business_type_hint = "This appears to be a beauty/personal care service business."
+        elif any(x in name_lower for x in ['clean', 'janitorial', 'maid', 'wash']):
+            business_type_hint = "This appears to be a cleaning/janitorial service business."
+        elif any(x in name_lower for x in ['landscap', 'lawn', 'garden', 'tree']):
+            business_type_hint = "This appears to be a landscaping/outdoor service business."
+        elif any(x in name_lower for x in ['hvac', 'plumb', 'electric', 'roofing', 'construction']):
+            business_type_hint = "This appears to be a trades/contractor business."
+        elif any(x in name_lower for x in ['franchise', 'brand', 'chain']):
+            business_type_hint = "This appears to be a franchise opportunity."
+
+        # Detect business type for market research
+        business_type = "small business"
+        if any(x in name_lower for x in ['auto', 'car', 'mechanic', 'repair shop', 'automotive']):
+            business_type = "auto repair shop"
+        elif any(x in name_lower for x in ['salon', 'spa', 'beauty', 'hair', 'nail']):
+            business_type = "beauty salon spa"
+        elif any(x in name_lower for x in ['clean', 'janitorial', 'maid', 'wash']):
+            business_type = "cleaning service"
+        elif any(x in name_lower for x in ['landscap', 'lawn', 'garden', 'tree']):
+            business_type = "landscaping service"
+        elif any(x in name_lower for x in ['hvac', 'plumb', 'electric', 'roofing', 'construction']):
+            business_type = "contractor trades"
+        elif any(x in name_lower for x in ['broker', 'consulting', 'agency']):
+            business_type = "business brokerage consulting"
+
+        # Fetch market comparison data using Tavily
+        market_data = search_market_data(business_type, business.asking_price)
+        market_section = ""
+        if market_data:
+            market_section = f"""
+MARKET RESEARCH DATA (for similar {business_type} businesses):
+{market_data}
+"""
+
         return f"""
 Business Name: {business.name}
+Listing URL: {business.url}
 Asking Price: {price_str}
 Cash Flow: {cashflow_str}
 Gross Revenue: {revenue_str}
@@ -465,15 +582,18 @@ Calculated Metrics:
 Business Description:
 {desc_str}
 
+{business_type_hint}
+
 Highlights: {highlights_str}
+{market_section}
 """
 
-    def _analyze_with_openai(self, business: BusinessData, metrics: BusinessMetrics, rule_based_swot: SWOTAnalysis) -> tuple[SWOTAnalysis, str, ViabilityAssessment]:
+    def _analyze_with_openai(self, business: BusinessData, metrics: BusinessMetrics, rule_based_swot: SWOTAnalysis) -> tuple[SWOTAnalysis, str, ViabilityAssessment, CompetitiveAnalysis]:
         """
         Use OpenAI to generate intelligent SWOT analysis, validate viability,
         and cross-check with rule-based analysis.
         """
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        client = _create_openai_client()
         business_context = self._build_business_context(business, metrics)
 
         # Include rule-based SWOT for cross-checking
@@ -493,12 +613,26 @@ TASK: Perform a comprehensive viability analysis of this business acquisition op
 
 {rule_swot_summary}
 
+INSTRUCTIONS:
+- Analyze the business based on the full description, financial metrics, and listing URL provided.
+- Apply your knowledge of similar businesses in this industry to provide detailed, specific analysis.
+- Consider typical challenges, opportunities, and characteristics of this type of business.
+
 Provide a thorough analysis including:
 
-1. **SWOT ANALYSIS** - Cross-check and enhance the rule-based analysis above. Be specific to THIS business.
+1. **SWOT ANALYSIS** - Cross-check and enhance the rule-based analysis above. Be SPECIFIC to THIS type of business.
    - Validate or challenge the automated findings
-   - Add insights the automated system may have missed
-   - Consider industry-specific factors
+   - Add industry-specific insights the automated system missed
+   - **COMPETITION & MARKET COMPARISON**: Analyze the competitive landscape and compare to similar businesses:
+     * Who are the typical competitors for this type of business?
+     * How does this asking price compare to similar businesses in the market? (use industry benchmarks)
+     * How do the revenue and cash flow compare to typical businesses of this size/type?
+     * Is the valuation (price/revenue ratio, price/cash flow multiple) reasonable vs industry norms?
+     * How saturated is this market?
+   - **BARRIERS TO ENTRY**: What protects this business from new competitors? (e.g., licenses, equipment costs, expertise, customer relationships, location, brand recognition)
+   - **MOAT ANALYSIS**: Does this business have a sustainable competitive advantage (moat)? Consider: brand loyalty, switching costs, network effects, proprietary technology, exclusive contracts, prime location, specialized expertise, or economies of scale.
+   - **OPERATIONAL RISKS**: What are the key risks of running this type of business? Consider: regulatory/licensing requirements, liability exposure, key employee dependency, seasonal fluctuations, technology disruption, supply chain risks, customer concentration, equipment maintenance costs, and industry-specific challenges.
+   - Include competition-related points in Threats, moat/barrier-related points in Strengths, and operational risks in Weaknesses/Threats where applicable
 
 2. **VIABILITY ASSESSMENT** - Critical evaluation:
    - Is this business viable for acquisition? (yes/no)
@@ -506,11 +640,16 @@ Provide a thorough analysis including:
    - Viability score (0-100)
 
 3. **RISK ANALYSIS**:
-   - Key risks a buyer should be aware of
+   - Key risks specific to this type of business
    - Red flags that warrant immediate attention
    - Critical due diligence items before purchase
 
-4. **RECOMMENDATION** - Clear, actionable advice for a potential buyer
+4. **COMPETITIVE ANALYSIS** - Based on the market research data provided:
+   - How does this business compare to industry averages?
+   - Is the valuation reasonable given the market data?
+   - What is the competitive position of this business?
+
+5. **RECOMMENDATION** - Clear, actionable advice for a potential buyer
 
 Respond in this exact JSON format:
 {{
@@ -529,6 +668,12 @@ Respond in this exact JSON format:
         "red_flags": ["red flag 1 if any", ...],
         "due_diligence_items": ["item 1", "item 2", ...],
         "verdict": "2-3 sentence overall verdict on viability"
+    }},
+    "competitive_analysis": {{
+        "market_position": "How this business compares to competitors (1-2 sentences)",
+        "valuation_assessment": "Is the asking price fair based on industry multiples? (1-2 sentences)",
+        "competitive_advantages": ["advantage 1", "advantage 2", ...],
+        "competitive_threats": ["threat 1", "threat 2", ...]
     }},
     "recommendation": "Your detailed 2-4 sentence recommendation for potential buyer"
 }}
@@ -580,13 +725,22 @@ Respond in this exact JSON format:
                 verdict=viability_data.get("verdict", "")
             )
 
+            # Build Competitive Analysis
+            competitive_data = result.get("competitive_analysis", {})
+            competitive = CompetitiveAnalysis(
+                market_position=competitive_data.get("market_position", ""),
+                valuation_assessment=competitive_data.get("valuation_assessment", ""),
+                competitive_advantages=competitive_data.get("competitive_advantages", []),
+                competitive_threats=competitive_data.get("competitive_threats", [])
+            )
+
             recommendation = result.get("recommendation", "")
 
-            return swot, recommendation, viability
+            return swot, recommendation, viability, competitive
 
         except Exception as e:
             print(f"OpenAI analysis failed: {e}, falling back to rule-based")
-            return None, None, None
+            return None, None, None, None
 
     def analyze(self, business: BusinessData, use_ai: bool = True) -> AnalysisResult:
         """
@@ -608,11 +762,13 @@ Respond in this exact JSON format:
         swot = rule_based_swot
         recommendation = None
         viability = None
+        competitive = None
         ai_enhanced = False
+        market_data = ""
 
         # Try OpenAI analysis if available and enabled
         if use_ai and OPENAI_AVAILABLE:
-            ai_swot, ai_recommendation, ai_viability = self._analyze_with_openai(
+            ai_swot, ai_recommendation, ai_viability, ai_competitive = self._analyze_with_openai(
                 business, metrics, rule_based_swot
             )
 
@@ -626,6 +782,34 @@ Respond in this exact JSON format:
 
             if ai_viability is not None:
                 viability = ai_viability
+
+            if ai_competitive is not None:
+                competitive = ai_competitive
+
+        # Fetch market data for display (even if OpenAI isn't available)
+        name_lower = business.name.lower()
+        business_type = "small business"
+        if any(x in name_lower for x in ['auto', 'car', 'mechanic', 'repair shop', 'automotive']):
+            business_type = "auto repair shop"
+        elif any(x in name_lower for x in ['salon', 'spa', 'beauty', 'hair', 'nail']):
+            business_type = "beauty salon spa"
+        elif any(x in name_lower for x in ['clean', 'janitorial', 'maid', 'wash']):
+            business_type = "cleaning service"
+        elif any(x in name_lower for x in ['landscap', 'lawn', 'garden', 'tree']):
+            business_type = "landscaping service"
+        elif any(x in name_lower for x in ['hvac', 'plumb', 'electric', 'roofing', 'construction']):
+            business_type = "contractor trades"
+        elif any(x in name_lower for x in ['broker', 'consulting', 'agency']):
+            business_type = "business brokerage consulting"
+
+        market_analysis = ""
+        if TAVILY_AVAILABLE:
+            market_data = search_market_data(business_type, business.asking_price)
+            # Generate comprehensive AI analysis from market data + business description
+            if market_data and OPENAI_AVAILABLE:
+                market_analysis = self._generate_market_analysis(
+                    business, metrics, market_data, business_type
+                )
 
         # Calculate score (uses merged SWOT if AI enhanced)
         score = self.calculate_score(business, metrics, swot)
@@ -659,8 +843,71 @@ Respond in this exact JSON format:
             overall_score=score,
             recommendation=recommendation,
             viability=viability,
-            ai_enhanced=ai_enhanced
+            ai_enhanced=ai_enhanced,
+            market_data=market_data,
+            market_analysis=market_analysis,
+            competitive=competitive
         )
+
+    def _generate_market_analysis(self, business: BusinessData, metrics: BusinessMetrics,
+                                     market_data: str, business_type: str) -> str:
+        """
+        Generate a comprehensive market analysis using OpenAI.
+        Combines business description with market research data.
+        """
+        if not OPENAI_AVAILABLE or not market_data:
+            return ""
+
+        try:
+            client = _create_openai_client()
+
+            # Build context
+            price_str = f"${business.asking_price:,.0f}" if business.asking_price else "Not disclosed"
+            cashflow_str = f"${business.cash_flow:,.0f}/year" if business.cash_flow else "Not disclosed"
+            revenue_str = f"${business.gross_revenue:,.0f}/year" if business.gross_revenue else "Not disclosed"
+            roi_str = f"{metrics.roi_percent:.1f}%" if metrics.roi_percent else "N/A"
+
+            prompt = f"""You are a business analyst providing market context for a potential acquisition.
+
+BUSINESS BEING EVALUATED:
+- Name: {business.name}
+- Type: {business_type}
+- Asking Price: {price_str}
+- Annual Cash Flow: {cashflow_str}
+- Annual Revenue: {revenue_str}
+- ROI: {roi_str}
+- Location: {business.location or 'Not specified'}
+
+BUSINESS DESCRIPTION:
+{business.description or 'No description available'}
+
+MARKET RESEARCH DATA:
+{market_data}
+
+Based on the above information, provide a comprehensive MARKET ANALYSIS in 3-4 paragraphs:
+
+1. **Market Context**: How does this business fit within its industry? What are typical characteristics and valuations for this type of business?
+
+2. **Valuation Assessment**: Is the asking price reasonable compared to industry benchmarks? How do the financial metrics (ROI, cash flow, revenue) compare to similar businesses?
+
+3. **Competitive Landscape**: What is the competitive environment like for this type of business? What market trends could affect it?
+
+4. **Key Considerations**: What should a buyer know about this market segment before purchasing?
+
+Be specific and reference actual data points. Keep the analysis concise but insightful."""
+
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=800
+            )
+
+            return response.choices[0].message.content.strip()
+
+        except Exception as e:
+            print(f"Error generating market analysis: {e}")
+            return ""
 
     def _merge_swot_analyses(self, rule_based: SWOTAnalysis, ai_based: SWOTAnalysis) -> SWOTAnalysis:
         """

@@ -13,6 +13,7 @@ import httpx
 from bs4 import BeautifulSoup
 from typing import Optional
 from dataclasses import dataclass, field
+from urllib.parse import urlencode
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -176,7 +177,6 @@ class BizBuySellScraper:
 
     def _fetch_url(self, url: str) -> str:
         """Fetch URL with ScraperAPI support for bypassing blocks."""
-        from urllib.parse import urlencode
         errors = []
 
         # If ScraperAPI key is provided, try it first with retries
@@ -230,33 +230,44 @@ class BizBuySellScraper:
         raise Exception(f"All methods failed: {'; '.join(errors)}")
 
     def fetch_full_description(self, listing_url: str) -> str:
-        """Fetch the full description from an individual listing page."""
+        """
+        Fetch the full description from the mobile site.
+        The mobile site has complete descriptions in JSON-LD data.
+        """
+        if not self.scraper_api_key:
+            return ""
+
+        # Convert desktop URL to mobile URL
+        mobile_url = listing_url.replace('www.bizbuysell.com', 'm.bizbuysell.com')
+
         try:
-            html = self._fetch_url(listing_url)
-            soup = BeautifulSoup(html, 'lxml')
+            params = {
+                'api_key': self.scraper_api_key,
+                'url': mobile_url,
+                'render': 'false'
+            }
+            api_url = f"http://api.scraperapi.com?{urlencode(params)}"
 
-            # Try multiple selectors for the description
-            desc_selectors = [
-                'div.businessDescription',
-                'div[class*="description"]',
-                'div.listing-description',
-                '#businessDescription',
-                'article.description',
-            ]
+            session = requests.Session()
+            session.trust_env = False  # Disable proxy from env
 
-            for selector in desc_selectors:
-                desc_elem = soup.select_one(selector)
-                if desc_elem:
-                    text = desc_elem.get_text(separator=' ', strip=True)
-                    if len(text) > 100:  # Must be substantial
-                        return text
+            response = session.get(api_url, timeout=35)
 
-            # Fallback: find largest text block
-            paragraphs = soup.find_all('p')
-            if paragraphs:
-                longest = max(paragraphs, key=lambda p: len(p.get_text()), default=None)
-                if longest and len(longest.get_text()) > 100:
-                    return longest.get_text(strip=True)
+            if response.status_code != 200 or len(response.text) < 1000:
+                return ""
+
+            soup = BeautifulSoup(response.text, 'lxml')
+
+            # Get description from JSON-LD (most reliable source)
+            for script in soup.find_all('script', type='application/ld+json'):
+                try:
+                    data = json.loads(script.string)
+                    if isinstance(data, dict) and 'description' in data:
+                        desc = data['description']
+                        if len(desc) > 100 and not desc.rstrip().endswith('...'):
+                            return desc
+                except:
+                    pass
 
             return ""
         except Exception:
@@ -355,17 +366,55 @@ class BizBuySellScraper:
                 if loc_match:
                     data.location = loc_match.group(1)
 
-                # Extract price (first dollar amount is usually asking price)
-                price_matches = re.findall(r'\$([\d,]+)', card_text)
-                if price_matches:
-                    data.asking_price = self._parse_currency(price_matches[0])
+                # BizBuySell card format: "... description ... | $PRICE | $PRICE | Cash Flow: $CF"
+                # The asking price appears BEFORE "Cash Flow:" and is typically repeated
 
-                # Extract cash flow
-                cf_match = re.search(r'cash\s*flow[:\s]*\$?([\d,]+)', card_text, re.IGNORECASE)
+                # First, find cash flow if labeled (to know where asking price ends)
+                # Handle variations like "Cash Flow:", "Cash Flow (SDE):", etc.
+                cf_match = re.search(r'cash\s*flow(?:\s*\([^)]+\))?[:\s]*\$?([\d,]+)', card_text, re.IGNORECASE)
+                cash_flow_value = None
                 if cf_match:
-                    data.cash_flow = self._parse_currency(cf_match.group(1))
+                    cash_flow_value = self._parse_currency(cf_match.group(1))
 
-                # Extract revenue
+                # Find all dollar amounts
+                price_matches = re.findall(r'\$([\d,]+)', card_text)
+                all_amounts = [self._parse_currency(p) for p in price_matches if self._parse_currency(p)]
+
+                # Determine asking price
+                asking_price_match = re.search(r'asking\s*price[:\s]*\$?([\d,]+)', card_text, re.IGNORECASE)
+                if asking_price_match:
+                    data.asking_price = self._parse_currency(asking_price_match.group(1))
+                elif all_amounts:
+                    # Filter out the cash flow value from consideration for asking price
+                    price_candidates = [a for a in all_amounts if a != cash_flow_value]
+
+                    if price_candidates:
+                        # Find the most common value or the one that appears at the end
+                        # Asking price is typically repeated twice
+                        from collections import Counter
+                        counts = Counter(price_candidates)
+                        most_common = counts.most_common(1)[0]
+
+                        if most_common[1] >= 2:
+                            # A value appears twice - this is likely the asking price
+                            data.asking_price = most_common[0]
+                        else:
+                            # Use the last non-cashflow price
+                            data.asking_price = price_candidates[-1]
+                    elif all_amounts:
+                        # All amounts equal cash flow, use first one as asking price
+                        data.asking_price = all_amounts[0]
+
+                # Set cash flow (with sanity check)
+                if cash_flow_value:
+                    # Sanity check: cash flow should produce reasonable ROI (up to 200%)
+                    # Some well-performing businesses can have ROI > 100%
+                    if data.asking_price and cash_flow_value <= data.asking_price * 2:
+                        data.cash_flow = cash_flow_value
+                    elif not data.asking_price:
+                        data.cash_flow = cash_flow_value
+
+                # Extract revenue - MUST be explicitly labeled
                 rev_match = re.search(r'(?:gross\s*)?revenue[:\s]*\$?([\d,]+)', card_text, re.IGNORECASE)
                 if rev_match:
                     data.gross_revenue = self._parse_currency(rev_match.group(1))
@@ -392,7 +441,7 @@ def scrape_listings(
     progress_callback=None,
     scraper_api_key: str = None,
     filter_excluded: bool = True,
-    fetch_full_details: bool = False  # Disabled by default - individual pages timeout
+    fetch_full_details: bool = True  # Fetch full descriptions from mobile site
 ) -> list[BusinessData]:
     """
     Main function to scrape multiple business listings.
