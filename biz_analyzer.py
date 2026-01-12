@@ -453,7 +453,6 @@ def render_comparison_table(results: list[AnalysisResult]):
 
             # Competitive Analysis (AI-powered with Tavily market data)
             if r.competitive or r.market_data:
-                st.markdown("---")
                 # Competitive Analysis (collapsible)
                 if r.competitive:
                     with st.expander("🏆 Competitive Analysis", expanded=False):
