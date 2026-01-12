@@ -158,6 +158,39 @@ class BizBuySellScraper:
         """Convert any BizBuySell URL to mobile version for better scraping."""
         return url.replace('www.bizbuysell.com', 'm.bizbuysell.com')
 
+    def _get_paginated_url(self, base_url: str, page_num: int) -> str:
+        """
+        Generate a paginated URL for BizBuySell.
+
+        URL pattern:
+        - Page 1: /california/businesses-for-sale/?q=... OR /california/businesses-for-sale/1/?q=...
+        - Page 2: /california/businesses-for-sale/2/?q=...
+
+        The page number goes before the query string.
+        """
+        # Split URL into path and query
+        if '?' in base_url:
+            path, query = base_url.split('?', 1)
+            query = '?' + query
+        else:
+            path = base_url
+            query = ''
+
+        # Remove trailing slash for easier manipulation
+        path = path.rstrip('/')
+
+        # Check if path already has a page number at the end
+        path_parts = path.split('/')
+        if path_parts and path_parts[-1].isdigit():
+            # Replace existing page number
+            path_parts[-1] = str(page_num)
+            new_path = '/'.join(path_parts)
+        else:
+            # Append page number
+            new_path = f"{path}/{page_num}"
+
+        return new_path + '/' + query
+
     def _parse_currency(self, text: str) -> Optional[float]:
         """Parse currency string to float."""
         if not text:
@@ -270,6 +303,7 @@ class BizBuySellScraper:
     def get_listings_from_search_page(self, parent_url: str, limit: int = 10, filter_excluded: bool = True, filter_callback=None) -> list[BusinessData]:
         """
         Extract business data directly from search results page (faster, more reliable).
+        Supports pagination - automatically fetches additional pages if needed.
         Filters out excluded business types (dental, legal, medical, restaurants, etc.)
 
         Args:
@@ -281,157 +315,177 @@ class BizBuySellScraper:
         Returns:
             List of BusinessData objects with data from search results
         """
-        # Always use mobile URL for better scraping reliability
-        mobile_url = self._to_mobile_url(parent_url)
-
-        try:
-            html = self._fetch_url(mobile_url)
-        except Exception as e:
-            raise Exception(f"Failed to fetch search page: {e}")
-
-        soup = BeautifulSoup(html, 'lxml')
         results = []
         seen_urls = set()
         excluded_count = 0
         total_checked = 0
+        current_page = 1
+        max_pages = 10  # Safety limit to prevent infinite loops
+        consecutive_empty_pages = 0
 
-        # BizBuySell uses Angular components - try multiple selectors
-        # app-listing-diamond for main listings, app-listing-basic for filtered/paginated results
-        listing_cards = soup.select('app-listing-diamond, app-listing-basic')
+        while len(results) < limit and current_page <= max_pages:
+            # Generate paginated URL
+            if current_page == 1:
+                # First page - use original URL (might or might not have /1/)
+                page_url = parent_url
+            else:
+                page_url = self._get_paginated_url(parent_url, current_page)
 
-        # Fallback: find parent containers of business-opportunity links
-        if not listing_cards:
-            for link in soup.find_all('a', href=lambda h: h and '/business-opportunity/' in h):
-                parent = link.find_parent(['app-listing-diamond', 'app-listing-basic', 'div', 'article'])
-                if parent and parent not in listing_cards:
-                    listing_cards.append(parent)
+            # Always use mobile URL for better scraping reliability
+            mobile_url = self._to_mobile_url(page_url)
 
-        for card in listing_cards:
+            try:
+                html = self._fetch_url(mobile_url)
+            except Exception as e:
+                if current_page == 1:
+                    raise Exception(f"Failed to fetch search page: {e}")
+                else:
+                    # Failed to fetch subsequent page, stop pagination
+                    break
+
+            soup = BeautifulSoup(html, 'lxml')
+
+            # BizBuySell uses Angular components - try multiple selectors
+            listing_cards = soup.select('app-listing-diamond, app-listing-basic')
+
+            # Fallback: find parent containers of business-opportunity links
+            if not listing_cards:
+                for link in soup.find_all('a', href=lambda h: h and '/business-opportunity/' in h):
+                    parent = link.find_parent(['app-listing-diamond', 'app-listing-basic', 'div', 'article'])
+                    if parent and parent not in listing_cards:
+                        listing_cards.append(parent)
+
+            if not listing_cards:
+                consecutive_empty_pages += 1
+                if consecutive_empty_pages >= 2:
+                    # No more pages available
+                    break
+                current_page += 1
+                continue
+
+            consecutive_empty_pages = 0
+            cards_processed_this_page = 0
+
+            for card in listing_cards:
+                if len(results) >= limit:
+                    break
+
+                try:
+                    # Extract URL
+                    link = card.find('a', href=lambda h: h and '/business-opportunity/' in h)
+                    if not link:
+                        continue
+
+                    url = link.get('href', '')
+                    if not url:
+                        continue
+                    if url.startswith('/'):
+                        url = self.BASE_URL + url
+
+                    # Skip duplicates (important for pagination)
+                    if url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+
+                    # Get all text from the card
+                    card_text = card.get_text(separator=' | ', strip=True)
+
+                    # Extract name/title - usually first part before location
+                    parts = card_text.split(' | ')
+                    name = parts[0] if parts else "Unknown Business"
+
+                    # Extract description for filtering
+                    description = ""
+                    if len(parts) > 2:
+                        for part in parts[2:]:
+                            if len(part) > 50 and not part.startswith('$'):
+                                description = part[:2000]
+                                break
+
+                    total_checked += 1
+                    cards_processed_this_page += 1
+
+                    # Filter out excluded business types
+                    if filter_excluded:
+                        if filter_callback:
+                            filter_callback(name[:30], total_checked, excluded_count)
+
+                        classification = _classify_with_ai(name, description)
+                        if classification.get("exclude", False):
+                            excluded_count += 1
+                            continue
+
+                    data = BusinessData(url=url, name=name)
+                    data.description = description
+
+                    # Extract location (usually "City, ST" format)
+                    loc_match = re.search(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2})', card_text)
+                    if loc_match:
+                        data.location = loc_match.group(1)
+
+                    # First, find cash flow if labeled
+                    cf_match = re.search(r'cash\s*flow(?:\s*\([^)]+\))?[:\s]*\$?([\d,]+)', card_text, re.IGNORECASE)
+                    cash_flow_value = None
+                    if cf_match:
+                        cash_flow_value = self._parse_currency(cf_match.group(1))
+
+                    # Find all dollar amounts
+                    price_matches = re.findall(r'\$([\d,]+)', card_text)
+                    all_amounts = [self._parse_currency(p) for p in price_matches if self._parse_currency(p)]
+
+                    # Determine asking price
+                    asking_price_match = re.search(r'asking\s*price[:\s]*\$?([\d,]+)', card_text, re.IGNORECASE)
+                    if asking_price_match:
+                        data.asking_price = self._parse_currency(asking_price_match.group(1))
+                    elif all_amounts:
+                        price_candidates = [a for a in all_amounts if a != cash_flow_value]
+
+                        if price_candidates:
+                            from collections import Counter
+                            counts = Counter(price_candidates)
+                            most_common = counts.most_common(1)[0]
+
+                            if most_common[1] >= 2:
+                                data.asking_price = most_common[0]
+                            else:
+                                data.asking_price = price_candidates[-1]
+                        elif all_amounts:
+                            data.asking_price = all_amounts[0]
+
+                    # Set cash flow (with sanity check)
+                    if cash_flow_value:
+                        if data.asking_price and cash_flow_value <= data.asking_price * 2:
+                            data.cash_flow = cash_flow_value
+                        elif not data.asking_price:
+                            data.cash_flow = cash_flow_value
+
+                    # Extract revenue
+                    rev_match = re.search(r'(?:gross\s*)?revenue[:\s]*\$?([\d,]+)', card_text, re.IGNORECASE)
+                    if rev_match:
+                        data.gross_revenue = self._parse_currency(rev_match.group(1))
+
+                    # Extract description
+                    if len(parts) > 2:
+                        for part in parts[2:]:
+                            if len(part) > 50 and not part.startswith('$'):
+                                data.description = part[:2000]
+                                break
+
+                    # Skip listings without cash flow (required for ROI calculation)
+                    if not data.cash_flow:
+                        continue
+
+                    results.append(data)
+
+                except Exception:
+                    continue
+
+            # Move to next page if we need more results
             if len(results) >= limit:
                 break
 
-            try:
-                # Extract URL
-                link = card.find('a', href=lambda h: h and '/business-opportunity/' in h)
-                if not link:
-                    continue
-
-                url = link.get('href', '')
-                if not url:
-                    continue
-                if url.startswith('/'):
-                    url = self.BASE_URL + url
-
-                # Skip duplicates
-                if url in seen_urls:
-                    continue
-                seen_urls.add(url)
-
-                # Get all text from the card
-                card_text = card.get_text(separator=' | ', strip=True)
-
-                # Extract name/title - usually first part before location
-                parts = card_text.split(' | ')
-                name = parts[0] if parts else "Unknown Business"
-                # Keep full name (no truncation)
-
-                # Extract description for filtering
-                description = ""
-                if len(parts) > 2:
-                    for part in parts[2:]:
-                        if len(part) > 50 and not part.startswith('$'):
-                            description = part[:2000]
-                            break
-
-                total_checked += 1
-
-                # Filter out excluded business types
-                if filter_excluded:
-                    if filter_callback:
-                        filter_callback(name[:30], total_checked, excluded_count)
-
-                    classification = _classify_with_ai(name, description)
-                    if classification.get("exclude", False):
-                        excluded_count += 1
-                        continue  # Skip this business
-
-                data = BusinessData(url=url, name=name)
-                data.description = description
-
-                # Extract location (usually "City, ST" format)
-                loc_match = re.search(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2})', card_text)
-                if loc_match:
-                    data.location = loc_match.group(1)
-
-                # BizBuySell card format: "... description ... | $PRICE | $PRICE | Cash Flow: $CF"
-                # The asking price appears BEFORE "Cash Flow:" and is typically repeated
-
-                # First, find cash flow if labeled (to know where asking price ends)
-                # Handle variations like "Cash Flow:", "Cash Flow (SDE):", etc.
-                cf_match = re.search(r'cash\s*flow(?:\s*\([^)]+\))?[:\s]*\$?([\d,]+)', card_text, re.IGNORECASE)
-                cash_flow_value = None
-                if cf_match:
-                    cash_flow_value = self._parse_currency(cf_match.group(1))
-
-                # Find all dollar amounts
-                price_matches = re.findall(r'\$([\d,]+)', card_text)
-                all_amounts = [self._parse_currency(p) for p in price_matches if self._parse_currency(p)]
-
-                # Determine asking price
-                asking_price_match = re.search(r'asking\s*price[:\s]*\$?([\d,]+)', card_text, re.IGNORECASE)
-                if asking_price_match:
-                    data.asking_price = self._parse_currency(asking_price_match.group(1))
-                elif all_amounts:
-                    # Filter out the cash flow value from consideration for asking price
-                    price_candidates = [a for a in all_amounts if a != cash_flow_value]
-
-                    if price_candidates:
-                        # Find the most common value or the one that appears at the end
-                        # Asking price is typically repeated twice
-                        from collections import Counter
-                        counts = Counter(price_candidates)
-                        most_common = counts.most_common(1)[0]
-
-                        if most_common[1] >= 2:
-                            # A value appears twice - this is likely the asking price
-                            data.asking_price = most_common[0]
-                        else:
-                            # Use the last non-cashflow price
-                            data.asking_price = price_candidates[-1]
-                    elif all_amounts:
-                        # All amounts equal cash flow, use first one as asking price
-                        data.asking_price = all_amounts[0]
-
-                # Set cash flow (with sanity check)
-                if cash_flow_value:
-                    # Sanity check: cash flow should produce reasonable ROI (up to 200%)
-                    # Some well-performing businesses can have ROI > 100%
-                    if data.asking_price and cash_flow_value <= data.asking_price * 2:
-                        data.cash_flow = cash_flow_value
-                    elif not data.asking_price:
-                        data.cash_flow = cash_flow_value
-
-                # Extract revenue - MUST be explicitly labeled
-                rev_match = re.search(r'(?:gross\s*)?revenue[:\s]*\$?([\d,]+)', card_text, re.IGNORECASE)
-                if rev_match:
-                    data.gross_revenue = self._parse_currency(rev_match.group(1))
-
-                # Extract description (usually after location)
-                if len(parts) > 2:
-                    # Find the description part (usually the longest text segment)
-                    for part in parts[2:]:
-                        if len(part) > 50 and not part.startswith('$'):
-                            data.description = part[:2000]
-                            break
-
-                # Skip listings without cash flow (required for ROI calculation)
-                if not data.cash_flow:
-                    continue
-
-                results.append(data)
-
-            except Exception:
-                continue
+            current_page += 1
+            time.sleep(0.5)  # Small delay between page requests
 
         return results
 
