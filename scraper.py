@@ -424,8 +424,8 @@ class BizBuySellScraper:
                             data.description = part[:2000]
                             break
 
-                # Skip listings without cash flow or gross revenue (require both)
-                if not data.cash_flow or not data.gross_revenue:
+                # Skip listings without cash flow (required for ROI calculation)
+                if not data.cash_flow:
                     continue
 
                 results.append(data)
