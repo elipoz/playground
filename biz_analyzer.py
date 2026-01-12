@@ -329,7 +329,7 @@ def render_header():
     # Show AI status
     openai_key = os.getenv("OPENAI_API_KEY", "")
     if openai_key and not openai_key.startswith("your_"):
-        st.caption("🤖 OpenAI integration active — viability validation & cross-checked SWOT enabled")
+        st.caption("🤖 OpenAI key configured (may require network access for AI features)")
     else:
         st.caption("⚠️ Add OPENAI_API_KEY to .env for AI-enhanced analysis")
 
@@ -359,10 +359,11 @@ def render_input_form():
 
     analyze_clicked = st.button("🚀 Analyze Opportunities", use_container_width=True)
 
-    # Show timing estimate
+    # Show timing estimate and filtering info
     openai_key = os.getenv("OPENAI_API_KEY", "")
     if openai_key and not openai_key.startswith("your_"):
-        st.caption(f"⏱️ Estimated time: ~{limit * 10} seconds (AI analysis takes ~10s per listing)")
+        st.caption(f"⏱️ Estimated time: ~{limit * 10 + 10}s (includes AI filtering & analysis)")
+        st.caption("🔍 Auto-filtering: dental, legal, CPA, medical, and restaurants are excluded")
 
     return url, limit, analyze_clicked, scraper_api_key if scraper_api_key else None
 
@@ -380,20 +381,13 @@ def render_comparison_table(results: list[AnalysisResult]):
     # Build DataFrame
     table_data = []
     for r in results:
-        # Viability indicator
-        viability_str = "N/A"
-        if r.viability:
-            viability_icon = "✅" if r.viability.is_viable else "❌"
-            viability_str = f"{viability_icon} {r.viability.confidence}"
-
         row = {
             "Rank": f"#{r.rank}",
-            "Business": r.business.name[:40] + "..." if len(r.business.name) > 40 else r.business.name,
+            "Business": r.business.name,
             "Price": format_currency(r.business.asking_price),
             "Cash Flow": format_currency(r.business.cash_flow),
             "ROI": f"{r.metrics.roi_percent:.1f}%" if r.metrics.roi_percent else "N/A",
             "Score": f"{r.overall_score:.0f}/100",
-            "Viable": viability_str,
             "SWOT": r.swot.summary(),
         }
         table_data.append(row)
@@ -412,7 +406,6 @@ def render_comparison_table(results: list[AnalysisResult]):
             "Cash Flow": st.column_config.TextColumn("Cash Flow", width="small"),
             "ROI": st.column_config.TextColumn("ROI", width="small"),
             "Score": st.column_config.TextColumn("Score", width="small"),
-            "Viable": st.column_config.TextColumn("Viable", width="small"),
             "SWOT": st.column_config.TextColumn("SWOT", width="medium"),
         }
     )
@@ -422,7 +415,7 @@ def render_comparison_table(results: list[AnalysisResult]):
 
     for r in results:
         ai_badge = " 🤖" if r.ai_enhanced else ""
-        with st.expander(f"#{r.rank} - {r.business.name[:50]}... | Score: {r.overall_score:.0f}/100{ai_badge}"):
+        with st.expander(f"#{r.rank} - {r.business.name} | Score: {r.overall_score:.0f}/100{ai_badge}"):
             col1, col2 = st.columns(2)
 
             with col1:
@@ -500,11 +493,13 @@ def render_comparison_table(results: list[AnalysisResult]):
                             st.markdown(f"- {item}")
 
             st.markdown("---")
-            st.markdown(f"**🔗 Listing URL:** [{r.business.url}]({r.business.url})")
 
             if r.business.description:
                 st.markdown("**📝 Description:**")
-                st.markdown(f">{r.business.description[:500]}{'...' if len(r.business.description) > 500 else ''}")
+                st.markdown(f">{r.business.description}")
+
+            st.markdown("")
+            st.link_button("🔗 View Full Listing on BizBuySell", r.business.url, use_container_width=True)
 
 
 def render_top_picks(results: list[AnalysisResult]):
@@ -526,7 +521,7 @@ def render_top_picks(results: list[AnalysisResult]):
                 <div style="text-align: center; margin-bottom: 1rem;">
                     <span style="font-size: 3rem;">{medals[i]}</span>
                     <h3 style="margin: 0.5rem 0; font-size: 1.1rem; color: #f8fafc;">
-                        {result.business.name[:35]}{'...' if len(result.business.name) > 35 else ''}
+                        {result.business.name}
                     </h3>
                 </div>
                 <div style="text-align: center; margin-bottom: 1rem;">
@@ -597,9 +592,19 @@ def main():
                 # Map scraping progress to 0%-50% of progress bar
                 progress = (current / total) * 0.5 if total > 0 else 0
                 progress_bar.progress(progress)
-                status_text.markdown(f"📊 **{message}**")
+                # Show filtering status with icon
+                if "Filtering" in message:
+                    status_text.markdown(f"🔍 **{message}**")
+                else:
+                    status_text.markdown(f"📊 **{message}**")
 
-            businesses = scrape_listings(url, limit, update_progress, scraper_api_key=scraper_api_key)
+            businesses = scrape_listings(
+                url,
+                limit,
+                update_progress,
+                scraper_api_key=scraper_api_key,
+                filter_excluded=True  # Filter out dental, legal, medical, restaurants
+            )
 
             if not businesses:
                 st.error("❌ No business listings found. The page structure may have changed or the URL may be invalid.")

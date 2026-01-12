@@ -3,17 +3,105 @@ Web scraping module for BizBuySell business listings.
 Uses ScraperAPI to bypass anti-bot protection.
 """
 
+import os
 import re
 import time
+import json
 import urllib3
 import requests
 import httpx
 from bs4 import BeautifulSoup
 from typing import Optional
 from dataclasses import dataclass, field
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Disable SSL warnings for fallback methods
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Business types to exclude from results
+EXCLUDED_KEYWORDS = [
+    # Dental
+    "dental", "dentist", "orthodont",
+    # Legal
+    "lawyer", "attorney", "law firm", "legal practice", "law office",
+    # Accounting
+    "cpa", "accounting firm", "accountant", "tax practice", "bookkeeping",
+    # Medical
+    "medical center", "medical practice", "clinic", "healthcare", "physician",
+    "chiropractic", "chiropractor", "physical therapy", "optometry", "veterinar",
+    # Restaurants & Food Service (comprehensive)
+    "restaurant", "cafe", "café", "diner", "eatery", "food service", "pizzeria",
+    "pizza", "bistro", "grill", "kitchen", "dining", "bakery", "coffee shop",
+    "bar ", "tavern", "pub ", "brewery", "catering", "food truck", "ice cream",
+    "sandwich", "sushi", "taco", "burger", "bbq", "barbecue", "steakhouse",
+    "seafood", "thai", "chinese", "mexican", "italian", "indian", "japanese",
+    "vietnamese", "korean", "mediterranean", "greek", "french cuisine",
+    "fast food", "quick service", "qsr", "juice bar", "smoothie", "acai",
+    "donut", "bagel", "deli", "sub shop", "wing", "chicken", "noodle",
+    "ramen", "pho", "curry", "buffet", "food court", "cantina", "trattoria",
+]
+
+
+def _is_excluded_by_keywords(name: str, description: str) -> bool:
+    """Quick keyword check to filter obvious excluded business types."""
+    # Normalize text: lowercase and replace accented chars
+    text = f"{name} {description}".lower()
+    text = text.replace("é", "e").replace("è", "e").replace("ê", "e")
+    text = text.replace("á", "a").replace("à", "a").replace("ñ", "n")
+    return any(kw in text for kw in EXCLUDED_KEYWORDS)
+
+
+def _classify_with_ai(name: str, description: str) -> dict:
+    """
+    Use OpenAI to classify if business should be excluded.
+    Returns dict with 'exclude' (bool) and 'reason' (str).
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key or api_key.startswith("your_"):
+        # Fall back to keyword matching if no API key
+        exclude = _is_excluded_by_keywords(name, description)
+        return {"exclude": exclude, "reason": "keyword match" if exclude else ""}
+
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+
+        prompt = f"""Classify this business. Should it be EXCLUDED from an investment analysis?
+
+EXCLUDE these types (be strict):
+- Dental/Orthodontic practices
+- Law firms/Attorney practices
+- CPA/Accounting/Bookkeeping firms
+- Medical centers/Clinics/Healthcare practices
+- ANY food/beverage business: restaurants, cafes, pizzerias, fast food, ethnic food (Indian, Chinese, Thai, etc.), juice bars, coffee shops, bakeries, delis, food trucks, bars, breweries, ice cream shops, sandwich shops, etc.
+
+Business: {name}
+Description: {description[:300] if description else 'No description'}
+
+Respond JSON only: {{"exclude": true/false, "reason": "brief reason if excluded"}}"""
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Classify businesses. Respond only with valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0,
+            max_tokens=80
+        )
+
+        content = response.choices[0].message.content.strip()
+        if "```" in content:
+            content = content.split("```json")[-1].split("```")[0].strip()
+
+        return json.loads(content)
+
+    except Exception as e:
+        # Fall back to keyword matching on error
+        exclude = _is_excluded_by_keywords(name, description)
+        return {"exclude": exclude, "reason": f"keyword fallback" if exclude else ""}
 
 
 @dataclass
@@ -141,13 +229,49 @@ class BizBuySellScraper:
 
         raise Exception(f"All methods failed: {'; '.join(errors)}")
 
-    def get_listings_from_search_page(self, parent_url: str, limit: int = 10) -> list[BusinessData]:
+    def fetch_full_description(self, listing_url: str) -> str:
+        """Fetch the full description from an individual listing page."""
+        try:
+            html = self._fetch_url(listing_url)
+            soup = BeautifulSoup(html, 'lxml')
+
+            # Try multiple selectors for the description
+            desc_selectors = [
+                'div.businessDescription',
+                'div[class*="description"]',
+                'div.listing-description',
+                '#businessDescription',
+                'article.description',
+            ]
+
+            for selector in desc_selectors:
+                desc_elem = soup.select_one(selector)
+                if desc_elem:
+                    text = desc_elem.get_text(separator=' ', strip=True)
+                    if len(text) > 100:  # Must be substantial
+                        return text
+
+            # Fallback: find largest text block
+            paragraphs = soup.find_all('p')
+            if paragraphs:
+                longest = max(paragraphs, key=lambda p: len(p.get_text()), default=None)
+                if longest and len(longest.get_text()) > 100:
+                    return longest.get_text(strip=True)
+
+            return ""
+        except Exception:
+            return ""
+
+    def get_listings_from_search_page(self, parent_url: str, limit: int = 10, filter_excluded: bool = True, filter_callback=None) -> list[BusinessData]:
         """
         Extract business data directly from search results page (faster, more reliable).
+        Filters out excluded business types (dental, legal, medical, restaurants, etc.)
 
         Args:
             parent_url: URL of the BizBuySell search results page
             limit: Maximum number of listings to return
+            filter_excluded: Whether to filter out excluded business types
+            filter_callback: Optional callback(name, total_checked, excluded_count) for progress
 
         Returns:
             List of BusinessData objects with data from search results
@@ -160,6 +284,8 @@ class BizBuySellScraper:
         soup = BeautifulSoup(html, 'lxml')
         results = []
         seen_urls = set()
+        excluded_count = 0
+        total_checked = 0
 
         # BizBuySell uses Angular components - try multiple selectors
         # app-listing-diamond for main listings, app-listing-basic for filtered/paginated results
@@ -199,9 +325,30 @@ class BizBuySellScraper:
                 # Extract name/title - usually first part before location
                 parts = card_text.split(' | ')
                 name = parts[0] if parts else "Unknown Business"
-                name = name[:100]
+                # Keep full name (no truncation)
+
+                # Extract description for filtering
+                description = ""
+                if len(parts) > 2:
+                    for part in parts[2:]:
+                        if len(part) > 50 and not part.startswith('$'):
+                            description = part[:2000]
+                            break
+
+                total_checked += 1
+
+                # Filter out excluded business types
+                if filter_excluded:
+                    if filter_callback:
+                        filter_callback(name[:30], total_checked, excluded_count)
+
+                    classification = _classify_with_ai(name, description)
+                    if classification.get("exclude", False):
+                        excluded_count += 1
+                        continue  # Skip this business
 
                 data = BusinessData(url=url, name=name)
+                data.description = description
 
                 # Extract location (usually "City, ST" format)
                 loc_match = re.search(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2})', card_text)
@@ -228,7 +375,7 @@ class BizBuySellScraper:
                     # Find the description part (usually the longest text segment)
                     for part in parts[2:]:
                         if len(part) > 50 and not part.startswith('$'):
-                            data.description = part[:500]
+                            data.description = part[:2000]
                             break
 
                 results.append(data)
@@ -239,18 +386,34 @@ class BizBuySellScraper:
         return results
 
 
-def scrape_listings(parent_url: str, limit: int = 10, progress_callback=None, scraper_api_key: str = None) -> list[BusinessData]:
+def scrape_listings(
+    parent_url: str,
+    limit: int = 10,
+    progress_callback=None,
+    scraper_api_key: str = None,
+    filter_excluded: bool = True,
+    fetch_full_details: bool = False  # Disabled by default - individual pages timeout
+) -> list[BusinessData]:
     """
     Main function to scrape multiple business listings.
 
-    Uses fast extraction from search results page instead of visiting each listing
-    (individual pages often timeout with ScraperAPI free tier).
+    Uses fast extraction from search results page, then optionally fetches
+    full descriptions from individual listing pages.
+
+    Automatically filters out excluded business types:
+    - Dental/Orthodontic practices
+    - Law firms/Legal practices
+    - CPA/Accounting firms
+    - Medical centers/Clinics
+    - Restaurants/Cafes/Food service
 
     Args:
         parent_url: URL of the search results page
         limit: Maximum number of listings to scrape
         progress_callback: Optional callback function(current, total, message)
         scraper_api_key: Optional ScraperAPI key for bypassing blocks
+        filter_excluded: Whether to filter out excluded business types (default True)
+        fetch_full_details: Whether to fetch full descriptions from listing pages (default True)
 
     Returns:
         List of BusinessData objects
@@ -260,13 +423,35 @@ def scrape_listings(parent_url: str, limit: int = 10, progress_callback=None, sc
     if progress_callback:
         progress_callback(0, limit, "Fetching search results...")
 
+    # Create filter callback for progress updates
+    def filter_callback(name, total_checked, excluded_count):
+        if progress_callback:
+            progress_callback(0, limit, f"Filtering: checked {total_checked}, skipped {excluded_count} (checking '{name}...')")
+
     # Use fast extraction from search page (individual pages timeout)
-    results = scraper.get_listings_from_search_page(parent_url, limit)
+    results = scraper.get_listings_from_search_page(
+        parent_url,
+        limit,
+        filter_excluded=filter_excluded,
+        filter_callback=filter_callback
+    )
 
     if not results:
-        raise Exception("No business listings found on the page. The page structure may have changed.")
+        raise Exception("No business listings found on the page. The page structure may have changed or all listings were filtered out.")
+
+    # Fetch full descriptions from individual listing pages
+    if fetch_full_details and scraper_api_key:
+        for i, business in enumerate(results):
+            if progress_callback:
+                progress_callback(i, len(results), f"Fetching details for {business.name[:30]}...")
+
+            full_desc = scraper.fetch_full_description(business.url)
+            if full_desc and len(full_desc) > len(business.description or ""):
+                business.description = full_desc
+
+            time.sleep(0.3)  # Small delay between requests
 
     if progress_callback:
-        progress_callback(len(results), len(results), f"Found {len(results)} listings!")
+        progress_callback(len(results), len(results), f"Found {len(results)} qualifying listings!")
 
     return results
