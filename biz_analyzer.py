@@ -826,8 +826,18 @@ def render_top_picks(results: list[AnalysisResult]):
             st.link_button("🔗 View Listing", result.business.url, use_container_width=True)
 
 
+def is_streamlit_cloud() -> bool:
+    """Check if running on Streamlit Cloud platform."""
+    # Streamlit Cloud runs from /mount/src/ directory
+    return os.path.exists("/mount/src") or os.getenv("STREAMLIT_SHARING_MODE") == "true"
+
+
 def check_password():
     """Returns True if the user has entered the correct password."""
+    # Skip password check when running locally (not on Streamlit Cloud)
+    if not is_streamlit_cloud():
+        return True
+
     # Get password from environment variable
     correct_password = os.getenv("APP_PASSWORD", "")
 

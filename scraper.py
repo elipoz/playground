@@ -437,19 +437,34 @@ class BizBuySellScraper:
                     data.asking_price = self._parse_currency(price_match.group(1))
                     break
 
-            # Cash flow - try multiple patterns
+            # Cash flow - try multiple patterns (order matters - most specific first)
             cf_patterns = [
-                r'cash\s*flow[:\s]*\$?([\d,]+)',
-                r'cf[:\s]*\$?([\d,]+)',
-                r'discretionary\s*(?:earnings?|cash)[:\s]*\$?([\d,]+)',
-                r'sde[:\s]*\$?([\d,]+)',
-                r'owner(?:\'?s?)?\s*(?:benefit|earnings?)[:\s]*\$?([\d,]+)',
+                r'cash\s*flow[:\s]*\$?([\d,]+(?:\.\d+)?)',
+                r'cash\s*flow[^$\d]{0,20}\$?([\d,]+(?:\.\d+)?)',  # Allow some chars between label and value
+                r'cf[:\s]*\$?([\d,]+(?:\.\d+)?)',
+                r'discretionary\s*(?:earnings?|cash)[:\s]*\$?([\d,]+(?:\.\d+)?)',
+                r'sde[:\s]*\$?([\d,]+(?:\.\d+)?)',
+                r'seller.?s?\s*discretionary\s*earnings?[:\s]*\$?([\d,]+(?:\.\d+)?)',
+                r'owner.?s?\s*(?:benefit|earnings?|cash\s*flow)[:\s]*\$?([\d,]+(?:\.\d+)?)',
+                r'net\s*(?:income|profit)[:\s]*\$?([\d,]+(?:\.\d+)?)',
+                r'ebitda[:\s]*\$?([\d,]+(?:\.\d+)?)',
             ]
             for pattern in cf_patterns:
                 cf_match = re.search(pattern, page_text, re.IGNORECASE)
                 if cf_match:
-                    data.cash_flow = self._parse_currency(cf_match.group(1))
-                    break
+                    parsed_cf = self._parse_currency(cf_match.group(1))
+                    if parsed_cf and parsed_cf > 0:
+                        data.cash_flow = parsed_cf
+                        break
+
+            # Debug: print cash flow search context if not found
+            if not data.cash_flow:
+                # Look for "cash flow" in text and show surrounding context
+                cf_context = re.search(r'.{0,50}cash\s*flow.{0,50}', page_text, re.IGNORECASE)
+                if cf_context:
+                    print(f"DEBUG: Cash flow context found: '{cf_context.group(0)}'")
+                else:
+                    print("DEBUG: 'cash flow' not found in page text")
 
             # Gross revenue - try multiple patterns
             rev_patterns = [
@@ -473,9 +488,19 @@ class BizBuySellScraper:
                     data.asking_price = self._parse_currency(alt_price.group(1))
 
             if not data.cash_flow:
-                alt_cf = re.search(r'cash\s*flow\s*\|?\s*\$?([\d,]+)', page_text, re.IGNORECASE)
-                if alt_cf:
-                    data.cash_flow = self._parse_currency(alt_cf.group(1))
+                # Try more flexible patterns with various separators
+                alt_cf_patterns = [
+                    r'cash\s*flow\s*[:\|]?\s*\$?([\d,]+(?:\.\d+)?)',
+                    r'cash\s*flow\s*\(?\s*(?:annual|yearly)?\s*\)?\s*[:\|]?\s*\$?([\d,]+(?:\.\d+)?)',
+                    r'\$\s*([\d,]+(?:\.\d+)?)\s*(?:cash\s*flow|cf)',
+                ]
+                for pattern in alt_cf_patterns:
+                    alt_cf = re.search(pattern, page_text, re.IGNORECASE)
+                    if alt_cf:
+                        parsed = self._parse_currency(alt_cf.group(1))
+                        if parsed and parsed > 0:
+                            data.cash_flow = parsed
+                            break
 
             if not data.gross_revenue:
                 alt_rev = re.search(r'(?:gross\s*)?revenue\s*\|?\s*\$?([\d,]+)', page_text, re.IGNORECASE)
