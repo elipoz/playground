@@ -199,7 +199,8 @@ class AnalysisResult:
     business: BusinessData
     metrics: BusinessMetrics
     swot: SWOTAnalysis
-    overall_score: float = 0.0
+    overall_score: float = 0.0  # Blended score (60% rule-based + 40% AI)
+    rule_based_score: float = 0.0  # Pure rule-based score before blending
     recommendation: str = ""
     rank: int = 0
     viability: Optional[ViabilityAssessment] = None
@@ -864,13 +865,14 @@ IMPORTANT: In all text values, write in plain text only. Do NOT use backticks, c
                     business, metrics, market_data, business_type
                 )
 
-        # Calculate score (uses merged SWOT if AI enhanced)
-        score = self.calculate_score(business, metrics, swot)
+        # Calculate rule-based score (uses merged SWOT if AI enhanced)
+        rule_based_score = self.calculate_score(business, metrics, swot)
+        score = rule_based_score
 
         # Adjust score based on AI viability assessment if available
         if viability and viability.viability_score > 0:
             # Blend rule-based score with AI viability score (60% rule-based, 40% AI)
-            score = round(score * 0.6 + viability.viability_score * 0.4, 1)
+            score = round(rule_based_score * 0.6 + viability.viability_score * 0.4, 1)
 
         # Generate recommendation if not provided by AI
         if recommendation is None:
@@ -894,6 +896,7 @@ IMPORTANT: In all text values, write in plain text only. Do NOT use backticks, c
             metrics=metrics,
             swot=swot,
             overall_score=score,
+            rule_based_score=rule_based_score,
             recommendation=recommendation,
             viability=viability,
             ai_enhanced=ai_enhanced,
