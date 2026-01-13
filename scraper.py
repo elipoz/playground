@@ -407,24 +407,101 @@ class BizBuySellScraper:
                                 state = addr.get('addressRegion', '')
                                 if city and state:
                                     data.location = f"{city}, {state}"
+                        # Try to extract price from JSON-LD (Product schema)
+                        if 'offers' in json_data:
+                            offers = json_data['offers']
+                            if isinstance(offers, dict) and 'price' in offers:
+                                try:
+                                    data.asking_price = float(offers['price'])
+                                except (ValueError, TypeError):
+                                    pass
+                        elif 'price' in json_data:
+                            try:
+                                data.asking_price = float(str(json_data['price']).replace(',', '').replace('$', ''))
+                            except (ValueError, TypeError):
+                                pass
                 except:
                     pass
 
-            # Extract financial data from page text
-            # Asking price
-            price_match = re.search(r'asking\s*price[:\s]*\$?([\d,]+)', page_text, re.IGNORECASE)
-            if price_match:
-                data.asking_price = self._parse_currency(price_match.group(1))
+            # Extract financial data from page text using multiple patterns
+            # Asking price - try multiple patterns
+            price_patterns = [
+                r'asking\s*price[:\s]*\$?([\d,]+)',
+                r'\$\s*([\d,]+)\s*(?:asking|list)',
+                r'price[:\s]*\$?([\d,]+)',
+                r'listed\s*(?:at|for)[:\s]*\$?([\d,]+)',
+            ]
+            for pattern in price_patterns:
+                price_match = re.search(pattern, page_text, re.IGNORECASE)
+                if price_match:
+                    data.asking_price = self._parse_currency(price_match.group(1))
+                    break
 
-            # Cash flow
-            cf_match = re.search(r'cash\s*flow[:\s]*\$?([\d,]+)', page_text, re.IGNORECASE)
-            if cf_match:
-                data.cash_flow = self._parse_currency(cf_match.group(1))
+            # Cash flow - try multiple patterns
+            cf_patterns = [
+                r'cash\s*flow[:\s]*\$?([\d,]+)',
+                r'cf[:\s]*\$?([\d,]+)',
+                r'discretionary\s*(?:earnings?|cash)[:\s]*\$?([\d,]+)',
+                r'sde[:\s]*\$?([\d,]+)',
+                r'owner(?:\'?s?)?\s*(?:benefit|earnings?)[:\s]*\$?([\d,]+)',
+            ]
+            for pattern in cf_patterns:
+                cf_match = re.search(pattern, page_text, re.IGNORECASE)
+                if cf_match:
+                    data.cash_flow = self._parse_currency(cf_match.group(1))
+                    break
 
-            # Gross revenue
-            rev_match = re.search(r'(?:gross\s*)?revenue[:\s]*\$?([\d,]+)', page_text, re.IGNORECASE)
-            if rev_match:
-                data.gross_revenue = self._parse_currency(rev_match.group(1))
+            # Gross revenue - try multiple patterns
+            rev_patterns = [
+                r'gross\s*revenue[:\s]*\$?([\d,]+)',
+                r'revenue[:\s]*\$?([\d,]+)',
+                r'gross\s*sales[:\s]*\$?([\d,]+)',
+                r'annual\s*(?:sales|revenue)[:\s]*\$?([\d,]+)',
+                r'sales[:\s]*\$?([\d,]+)',
+            ]
+            for pattern in rev_patterns:
+                rev_match = re.search(pattern, page_text, re.IGNORECASE)
+                if rev_match:
+                    data.gross_revenue = self._parse_currency(rev_match.group(1))
+                    break
+
+            # If still no financial data, try to find labeled dollar amounts in structured format
+            # BizBuySell often uses format like "Asking Price | $XXX,XXX" or "Asking Price$XXX,XXX"
+            if not data.asking_price:
+                alt_price = re.search(r'asking\s*price\s*\|?\s*\$?([\d,]+)', page_text, re.IGNORECASE)
+                if alt_price:
+                    data.asking_price = self._parse_currency(alt_price.group(1))
+
+            if not data.cash_flow:
+                alt_cf = re.search(r'cash\s*flow\s*\|?\s*\$?([\d,]+)', page_text, re.IGNORECASE)
+                if alt_cf:
+                    data.cash_flow = self._parse_currency(alt_cf.group(1))
+
+            if not data.gross_revenue:
+                alt_rev = re.search(r'(?:gross\s*)?revenue\s*\|?\s*\$?([\d,]+)', page_text, re.IGNORECASE)
+                if alt_rev:
+                    data.gross_revenue = self._parse_currency(alt_rev.group(1))
+
+            # Last resort: look for dollar amounts near keywords
+            if not data.asking_price or not data.cash_flow:
+                # Find all dollar amounts
+                all_amounts = re.findall(r'\$([\d,]+)', page_text)
+                parsed_amounts = [self._parse_currency(a) for a in all_amounts if self._parse_currency(a)]
+
+                if parsed_amounts and not data.asking_price:
+                    # The largest amount near the top is likely the asking price
+                    # Filter for reasonable asking prices (> $10k)
+                    valid_prices = [a for a in parsed_amounts if a >= 10000]
+                    if valid_prices:
+                        # Look for a value that appears multiple times (common for asking price)
+                        from collections import Counter
+                        counts = Counter(valid_prices)
+                        most_common = counts.most_common(1)
+                        if most_common and most_common[0][1] >= 2:
+                            data.asking_price = most_common[0][0]
+                        elif valid_prices:
+                            # Otherwise take the first large value
+                            data.asking_price = valid_prices[0]
 
             # Category/Industry
             cat_match = re.search(r'(?:category|industry|type)[:\s]*([A-Za-z][A-Za-z\s&/]+?)(?:\s*\||$)', page_text, re.IGNORECASE)
