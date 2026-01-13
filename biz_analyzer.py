@@ -616,6 +616,9 @@ def render_comparison_table(results: list[AnalysisResult]):
     # Build DataFrame
     table_data = []
     for r in results:
+        # Get AI viability score if available
+        ai_score = f"{r.viability.viability_score}/100" if r.viability and r.viability.viability_score else "N/A"
+
         row = {
             "Rank": f"#{r.rank}",
             "Business": r.business.name,
@@ -623,6 +626,7 @@ def render_comparison_table(results: list[AnalysisResult]):
             "Cash Flow": format_currency(r.business.cash_flow),
             "ROI": f"{r.metrics.roi_percent:.1f}%" if r.metrics.roi_percent else "N/A",
             "Score": f"{r.overall_score:.0f}/100",
+            "AI Score": ai_score,
             "SWOT": r.swot.summary(),
         }
         table_data.append(row)
@@ -641,6 +645,7 @@ def render_comparison_table(results: list[AnalysisResult]):
             "Cash Flow": st.column_config.TextColumn("Cash Flow", width="small"),
             "ROI": st.column_config.TextColumn("ROI", width="small"),
             "Score": st.column_config.TextColumn("Score", width="small"),
+            "AI Score": st.column_config.TextColumn("AI Score", width="small"),
             "SWOT": st.column_config.TextColumn("SWOT", width="medium"),
         }
     )
