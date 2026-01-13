@@ -625,9 +625,9 @@ def render_comparison_table(results: list[AnalysisResult]):
             "Price": format_currency(r.business.asking_price),
             "Cash Flow": format_currency(r.business.cash_flow),
             "ROI": f"{r.metrics.roi_percent:.1f}%" if r.metrics.roi_percent else "N/A",
-            "Rule": f"{r.rule_based_score:.0f}",
-            "AI": ai_score,
-            "Blended": f"{r.overall_score:.0f}",
+            "Rule Score": f"{r.rule_based_score:.0f}",
+            "AI Score": ai_score,
+            "Total Score": f"{r.overall_score:.0f}",
         }
         table_data.append(row)
 
@@ -644,16 +644,16 @@ def render_comparison_table(results: list[AnalysisResult]):
             "Price": st.column_config.TextColumn("Price", width="small"),
             "Cash Flow": st.column_config.TextColumn("Cash Flow", width="small"),
             "ROI": st.column_config.TextColumn("ROI", width="small"),
-            "Rule": st.column_config.TextColumn("Rule", width="small"),
-            "AI": st.column_config.TextColumn("AI", width="small"),
-            "Blended": st.column_config.TextColumn("Blended", width="small"),
+            "Rule Score": st.column_config.TextColumn("Rule Score", width="small"),
+            "AI Score": st.column_config.TextColumn("AI Score", width="small"),
+            "Total Score": st.column_config.TextColumn("Total Score", width="small"),
         }
     )
 
     # Scoring methodology note
-    st.caption("**Scoring:** Rule = ROI + Payback + Age + SWOT + Data completeness (0-100). "
-               "AI = OpenAI viability assessment (0-100). "
-               "**Blended = Rule × 0.6 + AI × 0.4**")
+    st.caption("**Scoring:** Rule Score = ROI + Payback + Age + SWOT + Data completeness (0-100). "
+               "AI Score = OpenAI viability assessment (0-100). "
+               "**Total Score = Rule Score × 0.6 + AI Score × 0.4**")
 
     # Expandable details for each business
     st.markdown("### 📋 Detailed Analysis")
