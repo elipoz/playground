@@ -9,7 +9,7 @@ import io
 import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
-from scraper import scrape_listings
+from scraper import scrape_listings, is_direct_listing_url, scrape_single_listing, SkippedListing
 from analyzer import analyze_businesses, AnalysisResult
 
 # Try to import python-docx for Word export
@@ -580,9 +580,9 @@ def render_input_form():
 
     with col1:
         url = st.text_input(
-            "🔗 BizBuySell Search URL",
-            placeholder="https://www.bizbuysell.com/california/san-francisco-bay-area-businesses-for-sale/...",
-            help="Paste a BizBuySell search results page URL"
+            "🔗 BizBuySell URL",
+            placeholder="https://www.bizbuysell.com/california/san-francisco-bay-area-businesses-for-sale/... or .../business-opportunity/...",
+            help="Paste a BizBuySell search page URL or a direct business listing URL"
         )
 
     with col2:
@@ -873,6 +873,8 @@ def main():
     # Session state for results
     if 'results' not in st.session_state:
         st.session_state.results = None
+    if 'skipped_listings' not in st.session_state:
+        st.session_state.skipped_listings = []
 
     if analyze_clicked:
         if not url:
@@ -888,32 +890,62 @@ def main():
         status_text = st.empty()
 
         try:
-            # Scraping phase
-            status_text.markdown("🔍 **Fetching business listings...**")
+            # Check if it's a direct listing URL or a search page
+            is_single_listing = is_direct_listing_url(url)
 
-            def update_progress(current, total, message):
-                # Map scraping progress to 0%-50% of progress bar
-                progress = (current / total) * 0.5 if total > 0 else 0
-                progress_bar.progress(progress)
-                # Show filtering status with icon
-                if "Filtering" in message:
-                    status_text.markdown(f"🔍 **{message}**")
-                else:
+            if is_single_listing:
+                # Direct listing URL - analyze just this one business
+                status_text.markdown("🔍 **Fetching business listing...**")
+
+                def single_progress(current, total, message):
+                    progress = (current / total) * 0.5 if total > 0 else 0
+                    progress_bar.progress(progress)
                     status_text.markdown(f"📊 **{message}**")
 
-            businesses = scrape_listings(
-                url,
-                limit,
-                update_progress,
-                scraper_api_key=scraper_api_key,
-                filter_excluded=True  # Filter out dental, legal, medical, restaurants
-            )
+                business = scrape_single_listing(
+                    url,
+                    single_progress,
+                    scraper_api_key=scraper_api_key
+                )
 
-            if not businesses:
-                st.error("❌ No business listings found. The page structure may have changed or the URL may be invalid.")
-                progress_bar.empty()
-                status_text.empty()
-                return
+                if not business:
+                    st.error("❌ Failed to fetch business listing. The page may be unavailable.")
+                    progress_bar.empty()
+                    status_text.empty()
+                    return
+
+                businesses = [business]
+                st.session_state.skipped_listings = []  # No skipped for single listing
+            else:
+                # Search page - scrape multiple listings
+                status_text.markdown("🔍 **Fetching business listings...**")
+
+                def update_progress(current, total, message):
+                    # Map scraping progress to 0%-50% of progress bar
+                    progress = (current / total) * 0.5 if total > 0 else 0
+                    progress_bar.progress(progress)
+                    # Show filtering status with icon
+                    if "Filtering" in message:
+                        status_text.markdown(f"🔍 **{message}**")
+                    else:
+                        status_text.markdown(f"📊 **{message}**")
+
+                businesses, skipped_listings = scrape_listings(
+                    url,
+                    limit,
+                    update_progress,
+                    scraper_api_key=scraper_api_key,
+                    filter_excluded=True  # Filter out dental, legal, medical, restaurants
+                )
+
+                # Store skipped listings
+                st.session_state.skipped_listings = skipped_listings
+
+                if not businesses:
+                    st.error("❌ No business listings found. The page structure may have changed or the URL may be invalid.")
+                    progress_bar.empty()
+                    status_text.empty()
+                    return
 
             # Analysis phase
             status_text.markdown("🧠 **Analyzing opportunities with AI...**")
@@ -927,7 +959,10 @@ def main():
             results = analyze_businesses(businesses, progress_callback=analysis_progress)
 
             progress_bar.progress(1.0)
-            status_text.markdown(f"✅ **Analysis complete! Found {len(results)} opportunities.**")
+            if is_single_listing:
+                status_text.markdown(f"✅ **Analysis complete!**")
+            else:
+                status_text.markdown(f"✅ **Analysis complete! Found {len(results)} opportunities.**")
 
             # Store results
             st.session_state.results = results
@@ -1023,6 +1058,26 @@ def main():
                     )
             else:
                 st.caption("Word export requires python-docx package")
+
+        # Display skipped listings at the bottom
+        if st.session_state.skipped_listings:
+            st.markdown("---")
+            with st.expander(f"⏭️ Skipped Listings ({len(st.session_state.skipped_listings)} total)", expanded=False):
+                st.markdown("These listings were skipped during analysis:")
+
+                # Group by reason
+                from collections import defaultdict
+                by_reason = defaultdict(list)
+                for skip in st.session_state.skipped_listings:
+                    by_reason[skip.reason].append(skip)
+
+                for reason, listings in sorted(by_reason.items()):
+                    st.markdown(f"**{reason}** ({len(listings)} listings)")
+                    for skip in listings:
+                        # Truncate name for display but keep full URL as link
+                        display_name = skip.name[:60] + "..." if len(skip.name) > 60 else skip.name
+                        st.markdown(f"- [{display_name}]({skip.url})")
+                    st.markdown("")  # Add spacing between groups
 
 
 if __name__ == "__main__":

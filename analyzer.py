@@ -1034,7 +1034,7 @@ def analyze_businesses(businesses: list[BusinessData], progress_callback=None) -
         progress_callback(0, total, f"Analyzing businesses (0/{total})...")
 
     # Use parallel analysis with max 4 concurrent workers (to avoid OpenAI rate limits)
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {executor.submit(analyze_single, b): b for b in businesses}
 
         for future in as_completed(futures):

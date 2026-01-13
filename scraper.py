@@ -46,13 +46,21 @@ EXCLUDED_KEYWORDS = [
 ]
 
 
-def _is_excluded_by_keywords(name: str, description: str) -> bool:
-    """Quick keyword check to filter obvious excluded business types."""
+def _get_excluded_keyword(name: str, description: str) -> Optional[str]:
+    """Check if business matches excluded keywords and return the matched keyword."""
     # Normalize text: lowercase and replace accented chars
     text = f"{name} {description}".lower()
     text = text.replace("é", "e").replace("è", "e").replace("ê", "e")
     text = text.replace("á", "a").replace("à", "a").replace("ñ", "n")
-    return any(kw in text for kw in EXCLUDED_KEYWORDS)
+    for kw in EXCLUDED_KEYWORDS:
+        if kw in text:
+            return kw
+    return None
+
+
+def _is_excluded_by_keywords(name: str, description: str) -> bool:
+    """Quick keyword check to filter obvious excluded business types."""
+    return _get_excluded_keyword(name, description) is not None
 
 
 def _classify_with_ai(name: str, description: str) -> dict:
@@ -63,8 +71,31 @@ def _classify_with_ai(name: str, description: str) -> dict:
     ALWAYS checks keywords first - if keyword match found, skip AI call.
     """
     # ALWAYS check keywords first - this is fast and reliable
-    if _is_excluded_by_keywords(name, description):
-        return {"exclude": True, "reason": "keyword match"}
+    matched_keyword = _get_excluded_keyword(name, description)
+    if matched_keyword:
+        # Categorize the keyword for a cleaner display
+        if matched_keyword in ["restaurant", "cafe", "coffee", "bakery", "pizza", "bar", "grill",
+                                "food truck", "catering", "diner", "eatery", "tavern", "bistro",
+                                "sandwich", "sushi", "taco", "burger", "bbq", "barbecue", "steakhouse",
+                                "seafood", "thai", "chinese", "mexican", "italian", "indian", "japanese",
+                                "vietnamese", "korean", "mediterranean", "greek", "french cuisine",
+                                "fast food", "quick service", "qsr", "juice bar", "smoothie", "acai",
+                                "donut", "bagel", "deli", "sub shop", "wing", "chicken", "noodle",
+                                "ramen", "pho", "curry", "buffet", "food court", "cantina", "trattoria"]:
+            return {"exclude": True, "reason": f"Restaurant/Food service ({matched_keyword})"}
+        elif matched_keyword in ["dental", "dentist", "orthodontic", "orthodontist", "oral surgery"]:
+            return {"exclude": True, "reason": f"Dental/Orthodontic practice ({matched_keyword})"}
+        elif matched_keyword in ["law firm", "attorney", "legal practice", "lawyer", "legal services"]:
+            return {"exclude": True, "reason": f"Law/Legal practice ({matched_keyword})"}
+        elif matched_keyword in ["cpa", "accounting firm", "tax practice", "bookkeeping"]:
+            return {"exclude": True, "reason": f"CPA/Accounting firm ({matched_keyword})"}
+        elif matched_keyword in ["medical", "clinic", "physician", "doctor", "healthcare",
+                                  "chiropractic", "chiropractor", "optometry", "optometrist",
+                                  "physical therapy", "urgent care", "med spa", "dermatology",
+                                  "veterinary", "vet clinic", "animal hospital", "pharmacy"]:
+            return {"exclude": True, "reason": f"Medical/Healthcare ({matched_keyword})"}
+        else:
+            return {"exclude": True, "reason": f"Excluded category ({matched_keyword})"}
 
     # If no keyword match, try AI classification for edge cases
     api_key = os.getenv("OPENAI_API_KEY")
@@ -133,6 +164,14 @@ class BusinessData:
     category: str = ""
     highlights: list = field(default_factory=list)
     raw_html: str = ""
+
+
+@dataclass
+class SkippedListing:
+    """Data class to track skipped listings and reasons."""
+    url: str
+    name: str
+    reason: str  # e.g., "Excluded business type (restaurant)", "No cash flow data"
 
 
 class BizBuySellScraper:
@@ -311,7 +350,104 @@ class BizBuySellScraper:
         except Exception:
             return ""
 
-    def get_listings_from_search_page(self, parent_url: str, limit: int = 10, filter_excluded: bool = True, filter_callback=None) -> list[BusinessData]:
+    def scrape_single_listing(self, listing_url: str) -> Optional[BusinessData]:
+        """
+        Scrape a single business listing page directly.
+
+        Args:
+            listing_url: Direct URL to a business listing (e.g., /business-opportunity/...)
+
+        Returns:
+            BusinessData object with full details, or None if scraping fails
+        """
+        if not self.scraper_api_key:
+            return None
+
+        try:
+            # Convert to mobile URL for better data extraction
+            mobile_url = self._to_mobile_url(listing_url)
+
+            params = {
+                'api_key': self.scraper_api_key,
+                'url': mobile_url,
+                'render': 'false'
+            }
+            api_url = f"http://api.scraperapi.com?{urlencode(params)}"
+
+            session = requests.Session()
+            session.trust_env = False
+
+            response = session.get(api_url, timeout=45)
+
+            if response.status_code != 200 or len(response.text) < 1000:
+                return None
+
+            soup = BeautifulSoup(response.text, 'lxml')
+            page_text = soup.get_text(separator=' | ', strip=True)
+
+            # Initialize business data
+            data = BusinessData(url=listing_url, name="Unknown Business")
+
+            # Extract data from JSON-LD (most reliable source)
+            for script in soup.find_all('script', type='application/ld+json'):
+                try:
+                    json_data = json.loads(script.string)
+                    if isinstance(json_data, dict):
+                        if 'name' in json_data:
+                            data.name = json_data['name']
+                        if 'description' in json_data:
+                            desc = json_data['description']
+                            desc = re.sub(r'\s*\n\s*', ' ', desc)
+                            desc = re.sub(r' +', ' ', desc)
+                            data.description = desc.strip()
+                        if 'address' in json_data:
+                            addr = json_data['address']
+                            if isinstance(addr, dict):
+                                city = addr.get('addressLocality', '')
+                                state = addr.get('addressRegion', '')
+                                if city and state:
+                                    data.location = f"{city}, {state}"
+                except:
+                    pass
+
+            # Extract financial data from page text
+            # Asking price
+            price_match = re.search(r'asking\s*price[:\s]*\$?([\d,]+)', page_text, re.IGNORECASE)
+            if price_match:
+                data.asking_price = self._parse_currency(price_match.group(1))
+
+            # Cash flow
+            cf_match = re.search(r'cash\s*flow[:\s]*\$?([\d,]+)', page_text, re.IGNORECASE)
+            if cf_match:
+                data.cash_flow = self._parse_currency(cf_match.group(1))
+
+            # Gross revenue
+            rev_match = re.search(r'(?:gross\s*)?revenue[:\s]*\$?([\d,]+)', page_text, re.IGNORECASE)
+            if rev_match:
+                data.gross_revenue = self._parse_currency(rev_match.group(1))
+
+            # Category/Industry
+            cat_match = re.search(r'(?:category|industry|type)[:\s]*([A-Za-z][A-Za-z\s&/]+?)(?:\s*\||$)', page_text, re.IGNORECASE)
+            if cat_match:
+                data.category = cat_match.group(1).strip()
+
+            # Employees
+            emp_match = re.search(r'(?:employees?|# of employees?)[:\s]*(\d+)', page_text, re.IGNORECASE)
+            if emp_match:
+                data.employees = int(emp_match.group(1))
+
+            # Year established
+            year_match = re.search(r'(?:established|year established|founded)[:\s]*(\d{4})', page_text, re.IGNORECASE)
+            if year_match:
+                data.year_established = int(year_match.group(1))
+
+            return data
+
+        except Exception as e:
+            print(f"Error scraping single listing: {e}")
+            return None
+
+    def get_listings_from_search_page(self, parent_url: str, limit: int = 10, filter_excluded: bool = True, filter_callback=None) -> tuple[list[BusinessData], list[SkippedListing]]:
         """
         Extract business data directly from search results page (faster, more reliable).
         Supports pagination - automatically fetches additional pages if needed.
@@ -324,9 +460,10 @@ class BizBuySellScraper:
             filter_callback: Optional callback(name, total_checked, excluded_count) for progress
 
         Returns:
-            List of BusinessData objects with data from search results
+            Tuple of (List of BusinessData objects, List of SkippedListing objects)
         """
         results = []
+        skipped = []  # Track skipped listings with reasons
         seen_urls = set()
         seen_names = set()  # Track business names to avoid duplicates
         excluded_count = 0  # Business type exclusions (restaurants, dental, etc.)
@@ -432,6 +569,8 @@ class BizBuySellScraper:
 
                         classification = _classify_with_ai(name, description)
                         if classification.get("exclude", False):
+                            reason = classification.get("reason", "Excluded business type")
+                            skipped.append(SkippedListing(url=url, name=name, reason=f"Excluded: {reason}"))
                             excluded_count += 1
                             continue
 
@@ -501,6 +640,7 @@ class BizBuySellScraper:
 
                     # Skip listings without cash flow (required for ROI calculation)
                     if not data.cash_flow:
+                        skipped.append(SkippedListing(url=url, name=name, reason="No cash flow data"))
                         no_cashflow_count += 1
                         continue
 
@@ -516,7 +656,7 @@ class BizBuySellScraper:
             current_page += 1
             time.sleep(0.5)  # Small delay between page requests
 
-        return results
+        return results, skipped
 
 
 def scrape_listings(
@@ -526,7 +666,7 @@ def scrape_listings(
     scraper_api_key: str = None,
     filter_excluded: bool = True,
     fetch_full_details: bool = True  # Fetch full descriptions from mobile site
-) -> list[BusinessData]:
+) -> tuple[list[BusinessData], list[SkippedListing]]:
     """
     Main function to scrape multiple business listings.
 
@@ -549,7 +689,7 @@ def scrape_listings(
         fetch_full_details: Whether to fetch full descriptions from listing pages (default True)
 
     Returns:
-        List of BusinessData objects
+        Tuple of (List of BusinessData objects, List of SkippedListing objects)
     """
     scraper = BizBuySellScraper(scraper_api_key=scraper_api_key)
 
@@ -562,7 +702,7 @@ def scrape_listings(
             progress_callback(0, limit, f"Filtering: checked {total_checked}, skipped {excluded_count} (checking '{name}...')")
 
     # Use fast extraction from search page (individual pages timeout)
-    results = scraper.get_listings_from_search_page(
+    results, skipped = scraper.get_listings_from_search_page(
         parent_url,
         limit,
         filter_excluded=filter_excluded,
@@ -599,4 +739,44 @@ def scrape_listings(
     if progress_callback:
         progress_callback(len(results), len(results), f"Found {len(results)} qualifying listings!")
 
-    return results
+    return results, skipped
+
+
+def is_direct_listing_url(url: str) -> bool:
+    """Check if the URL is a direct business listing (not a search page)."""
+    return '/business-opportunity/' in url.lower()
+
+
+def scrape_single_listing(
+    listing_url: str,
+    progress_callback=None,
+    scraper_api_key: str = None
+) -> Optional[BusinessData]:
+    """
+    Scrape a single business listing page.
+
+    Args:
+        listing_url: Direct URL to a business listing
+        progress_callback: Optional callback function(current, total, message)
+        scraper_api_key: ScraperAPI key for bypassing blocks
+
+    Returns:
+        BusinessData object with full details, or None if scraping fails
+    """
+    if not scraper_api_key:
+        raise Exception("ScraperAPI key is required for scraping")
+
+    scraper = BizBuySellScraper(scraper_api_key=scraper_api_key)
+
+    if progress_callback:
+        progress_callback(0, 1, "Fetching business listing...")
+
+    business = scraper.scrape_single_listing(listing_url)
+
+    if not business:
+        raise Exception("Failed to scrape business listing. The page may be unavailable.")
+
+    if progress_callback:
+        progress_callback(1, 1, f"Fetched: {business.name}")
+
+    return business
